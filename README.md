@@ -54,6 +54,7 @@ Configure the following in your Balena dashboard:
 ```bash
 # Push to your Balena fleet
 balena push <Your-Fleet-Name>
+```
 
-🛠 Research & Development
+## 🛠 Research & Development
 This project is part of the SmartCORE Interreg NWE initiative, led in Ireland by Munster Technological University (MTU).
