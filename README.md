@@ -10,7 +10,7 @@ A robust, containerized **Home Energy Management System (HEMS)** developed for t
 
 ## 🚀 Overview
 The SmartCORE project addresses the mismatch between renewable energy (RES) production and consumption. This gateway acts as the **Local Intelligence Layer**, enabling:
-* **Integral Energy Management:** Simple monitoring service.
+* **Integral Energy Management:** Simple energy monitoring service.
 * **Self-Healing Infrastructure:** Automated recovery and remote management via BalenaCloud.
 
 ---
