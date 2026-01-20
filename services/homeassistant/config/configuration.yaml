@@ -1,0 +1,35 @@
+
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
+
+automation defaults: !include_dir_merge_list automations
+automation ui: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 172.0.0.0/8
+    - 127.0.0.1
+
+influxdb:       
+  api_version: 2
+  ssl: false      
+  host: 172.18.4.3
+  port: 8086
+  token: !env_var INFLUX_TOKEN
+  organization: hems
+  bucket: home_assistant
+  include:
+    domains:
+      - sensor
+
+template: !include_dir_merge_list template_sensors/
+
+shell_command:
+  purge_backups: "/bin/bash /config/scripts/purge_backups.sh"

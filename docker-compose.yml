@@ -1,0 +1,109 @@
+version: '2'
+
+volumes:
+    hass-config:
+    mosquitto:
+    influxdb-data:
+    system-manager:
+
+services:
+
+  homeassistant:
+    build:
+      dockerfile: ./docker/Dockerfile
+      context: ./services/homeassistant
+    ports:
+      - 8123:8123
+      - 6053:6053
+    privileged: true
+    volumes:
+      - 'hass-config:/config'
+    restart: always
+    networks:
+      hems:
+        ipv4_address: 172.18.4.2
+
+  mqtt:
+    build: ./services/mqtt
+    ports:
+      - "1883:1883"
+    restart: always
+    volumes:
+      - mosquitto:/mosquitto/data
+    networks:
+      hems:
+        ipv4_address: 172.18.4.7
+
+  hass-configurator:
+    image: "causticlab/hass-configurator-docker:latest"
+    restart: always
+    ports:
+      - "3218:3218"
+    volumes:
+      - 'hass-config:/hass-config'
+    environment:
+      - HC_BASEPATH=/hass-config
+    networks:
+      hems:
+        ipv4_address: 172.18.4.6
+
+  led-status:
+    build: ./services/ledapp
+    devices:
+      - "/dev/gpiochip0:/dev/gpiochip0"
+    privileged: true
+    restart: always
+    networks:
+        hems:
+          ipv4_address: 172.18.4.9
+
+  influxdb:
+    build: ./services/influxdb
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    ports:
+      - "8086:8086"
+    networks:
+      hems:
+        ipv4_address: 172.18.4.3
+
+
+  system-manager:
+    build: ./services/system-manager
+    privileged: true
+    network_mode: host
+    volumes: 
+      - system-manager:/data
+    restart: on_failure
+    labels:
+      io.balena.features.supervisor-api: '1'
+
+  wifi-connect:
+    build: ./services/wifi-connect
+    network_mode: "host"
+    labels:
+      io.balena.features.dbus: '1'
+    cap_add:
+      - NET_ADMIN
+    environment:
+      DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/host/run/dbus/system_bus_socket"
+
+  nginx-reverse-proxy:
+    build:
+      dockerfile: ./Dockerfile
+      context: ./services/nginx-reverse-proxy
+    restart: always
+    ports:
+      - "80:80"
+    networks:
+      hems:
+        ipv4_address: 172.18.4.4
+  
+
+networks:
+  hems:
+    driver: bridge
+    ipam:
+     config:
+       - subnet: 172.18.4.0/24
+         gateway: 172.18.4.1
