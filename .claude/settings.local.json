@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(dir /s \"C:\\\\Users\\\\AvinashNagarajan\\\\PyCharmMiscProject\\\\ems\\\\services\" /b)",
-      "Bash(dir:*)"
-    ]
-  }
-}
