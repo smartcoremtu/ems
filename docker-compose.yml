@@ -48,14 +48,18 @@ services:
         ipv4_address: 172.18.4.6
 
   led-status:
-    build: ./services/ledapp
+    build: ./services/led-status
+    privileged: true
     devices:
       - "/dev/gpiochip0:/dev/gpiochip0"
-    privileged: true
     restart: always
     networks:
-        hems:
-          ipv4_address: 172.18.4.9
+      hems:
+        ipv4_address: 172.18.4.9
+    labels:
+      io.balena.features.supervisor-api: '1'
+    volumes:
+      - 'hass-config:/hass-config'
 
   influxdb:
     build: ./services/influxdb
