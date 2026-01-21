@@ -1,8 +1,9 @@
 name: SmartCORE
+description: >-
+  MTU SmartCORE project balena project
 type: sw.application
 data:
   defaultDeviceType: raspberrypi5
   supportedDeviceTypes:
-    - raspberrypi4-64
     - raspberrypi5
-version: 1.0.0
+version: 1.0.1
