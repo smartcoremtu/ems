@@ -356,6 +356,8 @@ Mosquitto is a **post box with no intelligence**. It holds no application logic.
 
 **Current status in this deployment:** The Frient blink counter is a Zigbee device and does not use MQTT. The broker is running but has no confirmed active Zigbee publisher. It is ready for future WiFi-based devices or the eesmart-d2l integration.
 
+**In the Zigbee2MQTT alternative architecture**, the broker becomes the active data bus: the `zigbee2mqtt` container (172.18.4.5) owns the USB dongle and publishes all Zigbee sensor data to `zigbee2mqtt/<device>` topics. The HA MQTT Integration subscribes and auto-creates entities via MQTT Discovery payloads published to `homeassistant/sensor/<device>/<field>/config`. See [`MQTT_AND_MOBILE_ACCESS.md`](MQTT_AND_MOBILE_ACCESS.md) for full topic structure, payload examples, and end-to-end flow.
+
 ---
 
 ### 4.4 Nginx Reverse Proxy — `172.18.4.4:80`
@@ -737,40 +739,78 @@ version: 1.0.1
 
 ## 7. Remote Access — Mobile Application
 
-By default, Home Assistant is only accessible on the same local network as the Pi. The HA mobile app (iOS/Android) on an external network (4G/5G) cannot reach it without one of the following configurations.
+> **Full technical detail** for all options — WireGuard NAT traversal mechanics, docker-compose.yml snippets, MQTT Discovery, Cloudflare Access setup, HA app URL configuration, and security trade-offs — is in [`MQTT_AND_MOBILE_ACCESS.md`](MQTT_AND_MOBILE_ACCESS.md) Section 5.
 
-### Option A — Nabu Casa (Recommended)
+By default, Home Assistant is only accessible on the same local network as the Pi. The HA mobile app (iOS/Android) on an external network (4G/5G) cannot reach it without one of the following configurations. All three options work without port forwarding, without a public IP, and all connections are encrypted in transit.
 
-Nabu Casa is the official Home Assistant Cloud service. It establishes a persistent tunnel from HA to Nabu Casa's servers that the mobile app connects through.
+| Option | Cost | Phone software | URL style |
+|---|---|---|---|
+| **A — Nabu Casa** | ~£6/mo | HA app only | `https://abc.ui.nabu.casa` |
+| **B — Tailscale** | Free | Tailscale + HA app | `http://100.64.x.x:80` |
+| **C — Cloudflare Tunnel** | Free + domain | HA app only | `https://hems.yourdomain.com` |
 
-**Setup:** In the HA web UI, go to Settings → Home Assistant Cloud → Sign In → Enable Remote UI. In the mobile app, sign in with the same Nabu Casa account.
+### Option A — Nabu Casa (Recommended for simplicity)
 
-**Why it works here:** No port forwarding required. No code changes required. The tunnel is initiated outbound from the Pi — it works behind any NAT router.
+HA opens a persistent outbound WebSocket to Nabu Casa's servers. The mobile app connects through that relay. Zero code changes, zero firewall changes.
 
-**Trade-off:** Requires a paid Nabu Casa subscription (~$7/month). Traffic passes through Nabu Casa's infrastructure.
+**Setup:** Settings → Home Assistant Cloud → Sign In → Enable Remote UI. Sign in with the same account in the mobile app.
 
-### Option B — Tailscale (Free)
+**Trade-off:** ~£6/month subscription. All traffic routes via Nabu Casa infrastructure.
 
-Tailscale creates a peer-to-peer encrypted VPN between the Pi and the mobile device.
+### Option B — Tailscale (Recommended for performance)
 
-**Setup:** Add a Tailscale container to `docker-compose.yml`:
+Tailscale builds a WireGuard mesh VPN. The Pi and phone share encrypted P2P WireGuard tunnels. No client traffic passes through Tailscale's servers after the initial handshake.
+
+**docker-compose.yml addition:**
 ```yaml
 tailscale:
   image: tailscale/tailscale:latest
-  network_mode: host
+  hostname: hems-pi
+  environment:
+    - TS_AUTHKEY=${TS_AUTH_KEY}           # set in Balena Cloud env vars
+    - TS_EXTRA_ARGS=--advertise-routes=172.18.4.0/24
+    - TS_STATE_DIR=/var/lib/tailscale
+  volumes:
+    - tailscale-state:/var/lib/tailscale
+  devices:
+    - /dev/net/tun:/dev/net/tun
   cap_add:
     - NET_ADMIN
     - SYS_MODULE
-  environment:
-    - TS_AUTHKEY=<your-auth-key>
+  networks:
+    hems:
+      ipv4_address: 172.18.4.10
+  restart: always
 ```
-Install Tailscale on the phone and sign in with the same account. Use the Pi's Tailscale IP (e.g. `http://100.x.x.x:80`) as the server URL in the mobile app.
 
-**Trade-off:** Free tier is sufficient. Both the Pi and phone must have Tailscale installed. No Nabu Casa dependency.
+Approve the `172.18.4.0/24` route in the Tailscale admin console once. Install Tailscale on the phone. External URL: `http://100.64.x.x:80`.
 
-### Option C — Direct port forwarding (Not Recommended)
+**Trade-off:** Free tier sufficient. Tailscale app required on every phone accessing the system.
 
-Forward port 8123 on the home router to the Pi's local IP. **This is not recommended** because the current codebase has no HTTPS/TLS configured. Exposing plain HTTP HA to the internet risks credential interception and unauthorised access.
+### Option C — Cloudflare Tunnel (Recommended for sharing access)
+
+`cloudflared` maintains outbound HTTPS connections to Cloudflare's global edge. Cloudflare routes a public domain to local Nginx. No inbound ports, no public IP, free TLS certificate managed by Cloudflare.
+
+**docker-compose.yml addition:**
+```yaml
+cloudflared:
+  image: cloudflare/cloudflared:latest
+  command: tunnel --no-autoupdate run
+  environment:
+    - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}    # set in Balena Cloud env vars
+  networks:
+    hems:
+      ipv4_address: 172.18.4.11
+  restart: always
+```
+
+Configure ingress rule in Cloudflare Zero Trust dashboard: `hems.yourdomain.com → http://172.18.4.4:80`. External URL: `https://hems.yourdomain.com`. Add Cloudflare IPs to `trusted_proxies` in `configuration.yaml`. Add Cloudflare Access policy for pre-authentication before requests reach HA.
+
+**Trade-off:** Requires a registered domain. Traffic routes via Cloudflare's CDN.
+
+### Option D — Direct port forwarding (Not Recommended)
+
+Forward port 8123 on the home router to the Pi's local IP. **Not recommended** — the current codebase has no HTTPS/TLS. Exposing plain HTTP HA to the internet risks credential interception and unauthorised access.
 
 ---
 

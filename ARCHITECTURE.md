@@ -279,12 +279,15 @@ All services except `system-manager` and `wifi-connect` are on the private `hems
 ```
 172.18.4.0/24  (gateway: 172.18.4.1)
 
-  .2  homeassistant
-  .3  influxdb
-  .4  nginx-reverse-proxy
-  .6  hass-configurator
-  .7  mqtt
-  .9  led-status
+  .2   homeassistant
+  .3   influxdb
+  .4   nginx-reverse-proxy
+  .5   zigbee2mqtt        (alternative arch — not in current docker-compose.yml)
+  .6   hass-configurator
+  .7   mqtt
+  .9   led-status
+  .10  tailscale          (optional — mobile access via VPN)
+  .11  cloudflared        (optional — mobile access via Cloudflare Tunnel)
 ```
 
 ### Nginx routing table
@@ -467,77 +470,86 @@ Balena performs a delta-compressed update — only changed layers are transferre
 
 ## 10. Accessing Home Assistant Remotely (Mobile)
 
-By default, HA is only accessible on the **local network** where the Raspberry Pi is connected. To use the official **Home Assistant mobile app** (iOS / Android) from an external network, one of the following approaches must be configured.
+> **Full technical detail** for all options — including docker-compose snippets, connection flow diagrams, WebSocket notes, and security trade-offs — is in [`docs/MQTT_AND_MOBILE_ACCESS.md`](docs/MQTT_AND_MOBILE_ACCESS.md) Section 5.
 
-### Option A — Nabu Casa (Home Assistant Cloud) ✅ Recommended
+By default, HA is only accessible on the **local network** where the Raspberry Pi is connected. To use the official **Home Assistant mobile app** (iOS / Android) from an external network, one of the following approaches must be configured. All three options work without port forwarding, without a public IP, and all traffic is encrypted in transit.
 
-This is the official, zero-configuration solution built into Home Assistant. It requires a paid Nabu Casa subscription (~$7/month) but needs no router changes or extra containers.
+The HA companion app supports two URLs:
+- **Internal URL** — used when on the home WiFi (e.g. `http://192.168.1.50:80`)
+- **External URL** — used on 4G or other networks (see options below)
 
-1. In the HA UI go to **Settings → Home Assistant Cloud**.
-2. Sign in or create a Nabu Casa account.
-3. Enable **Remote UI**.
-4. In the mobile app, enter your Nabu Casa credentials. The app discovers the remote URL automatically.
+| Option | Cost | Phone software | URL style | Pi changes |
+|---|---|---|---|---|
+| **A — Nabu Casa** | ~£6/mo | HA app only | `https://abc.ui.nabu.casa` | None |
+| **B — Tailscale** | Free | Tailscale + HA app | `http://100.64.x.x:80` | New container |
+| **C — Cloudflare Tunnel** | Free + domain | HA app only | `https://hems.yourdomain.com` | New container |
 
-**Pros:** Works behind NAT, no port forwarding, encrypted, supported by the HA project.
-**Cons:** Subscription cost, relies on Nabu Casa infrastructure.
+### Option A — Nabu Casa (HA Cloud)
 
-### Option B — Tailscale (Zero-config VPN)
+The official HA cloud relay. HA opens a persistent outbound WebSocket to Nabu Casa's servers; the mobile app connects through it. No code changes, no containers, no firewall rules.
 
-Tailscale creates a secure peer-to-peer VPN between your phone and the Raspberry Pi without any port forwarding or public IP.
+1. **Settings → Home Assistant Cloud → Sign In → Enable Remote UI**
+2. Install the HA app and sign in with the same Nabu Casa account
 
-1. Add a `tailscale` service to `docker-compose.yml`:
+**Pros:** Zero configuration, officially supported, automatic TLS.
+**Cons:** ~£6/month, all traffic routes via Nabu Casa's US infrastructure.
 
+### Option B — Tailscale VPN
+
+Tailscale builds a WireGuard peer-to-peer encrypted mesh between the Pi and the phone. The Pi gets a stable Tailscale IP (`100.64.x.x`). Tailscale's servers only broker the handshake — data flows directly.
+
+Add to `docker-compose.yml`:
 ```yaml
 tailscale:
   image: tailscale/tailscale:latest
-  network_mode: host
+  hostname: hems-pi
+  environment:
+    - TS_AUTHKEY=${TS_AUTH_KEY}           # set in Balena Cloud env vars
+    - TS_EXTRA_ARGS=--advertise-routes=172.18.4.0/24
+    - TS_STATE_DIR=/var/lib/tailscale
+  volumes:
+    - tailscale-state:/var/lib/tailscale
+  devices:
+    - /dev/net/tun:/dev/net/tun
   cap_add:
     - NET_ADMIN
     - SYS_MODULE
-  volumes:
-    - /var/lib/tailscale:/var/lib/tailscale
-  environment:
-    - TS_AUTHKEY=<your-tailscale-auth-key>
-    - TS_EXTRA_ARGS=--advertise-routes=172.18.4.0/24
+  networks:
+    hems:
+      ipv4_address: 172.18.4.10
+  restart: always
 ```
 
-2. Install Tailscale on your phone and log in with the same account.
-3. In the HA mobile app, use the Tailscale IP (e.g. `http://100.x.x.x:8123`) as the internal URL.
+In the Tailscale admin console, approve the advertised route `172.18.4.0/24` once. Install Tailscale on your phone. Set external URL to `http://100.64.x.x:80`.
 
-**Pros:** Free tier available, no port forwarding, works on all networks, end-to-end encrypted.
-**Cons:** Both devices must have Tailscale installed and be logged into the same account.
+**Pros:** Free, lowest latency (P2P), Pi IP never exposed, WireGuard encryption.
+**Cons:** Tailscale app required on every phone; all phones must be in the same account.
 
 ### Option C — Cloudflare Tunnel
 
-Routes traffic from a public `*.trycloudflare.com` (or custom) domain to your Raspberry Pi without opening any inbound ports.
+`cloudflared` opens outbound HTTPS connections to Cloudflare's edge. Cloudflare routes a public HTTPS domain to your local Nginx — no inbound ports, no public IP, free TLS from Cloudflare.
 
-1. Create a Cloudflare account and install `cloudflared` as a new container:
-
+Add to `docker-compose.yml`:
 ```yaml
-cloudflare-tunnel:
+cloudflared:
   image: cloudflare/cloudflared:latest
   command: tunnel --no-autoupdate run
   environment:
-    - TUNNEL_TOKEN=<your-tunnel-token>
-  restart: always
+    - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}    # set in Balena Cloud env vars
   networks:
     hems:
       ipv4_address: 172.18.4.11
+  restart: always
 ```
 
-2. Map the tunnel to `http://172.18.4.2:8123` in the Cloudflare dashboard.
-3. Use the resulting public HTTPS URL in the HA mobile app.
-4. Set the domain in HA's `http:` config under `trusted_proxies` to include Cloudflare's IP ranges.
+In the Cloudflare Zero Trust dashboard: create a tunnel, set ingress rule `hems.yourdomain.com → http://172.18.4.4:80`. Set external URL in HA app to `https://hems.yourdomain.com`. Add Cloudflare IP ranges to `trusted_proxies` in `configuration.yaml`.
 
-**Pros:** Free, HTTPS out of the box, custom domain support.
-**Cons:** Traffic routes via Cloudflare's infrastructure; slightly more complex setup.
+**Pros:** No phone client software, public HTTPS URL, free TLS, DDoS protection via Cloudflare CDN, Cloudflare Access adds pre-authentication layer.
+**Cons:** Requires a domain name, traffic routes via Cloudflare edge.
 
-### Option D — Port forwarding (direct, not recommended)
+### Option D — Port forwarding (not recommended)
 
-Forward port 8123 on your router to the Raspberry Pi's local IP. Then use `http://<your-public-ip>:8123` in the mobile app.
-
-**Pros:** Simplest network setup.
-**Cons:** Exposes HA directly to the internet. HTTPS must be manually configured. The current setup has no TLS — this is a known gap (see [Section 11](#11-known-gaps--future-work)). Not recommended without TLS.
+Forward port 8123 on the home router to the Pi's local IP. The current codebase has no HTTPS/TLS — this exposes plain HTTP HA to the internet. Not recommended without TLS termination at Nginx.
 
 ---
 
@@ -583,6 +595,39 @@ Forward port 8123 on your router to the Raspberry Pi's local IP. Then use `http:
 - Replace the DNS name with an external IP/hostname if it is a remote service
 
 This is currently a broken proxy route and should be resolved before production deployment.
+
+---
+
+---
+
+## 12. Alternative Architecture — Zigbee2MQTT
+
+The current deployment uses **ZHA** (Zigbee Home Automation), which runs inside the HA process and communicates directly with the USB dongle. An alternative approach is **Zigbee2MQTT**, which moves the Zigbee coordinator stack to a separate container and routes all device data through the MQTT broker.
+
+> **Full technical detail** — including docker-compose changes, MQTT topic structure, MQTT Discovery payload examples, end-to-end message flow, and retained message behaviour — is in [`docs/MQTT_AND_MOBILE_ACCESS.md`](docs/MQTT_AND_MOBILE_ACCESS.md) Sections 1–4.
+
+The alternative architecture diagram (PlantUML) is at [`docs/architecture_z2m_vpn.puml`](docs/architecture_z2m_vpn.puml).
+
+### Key differences
+
+| Aspect | Current (ZHA) | Zigbee2MQTT |
+|---|---|---|
+| USB dongle owner | `homeassistant` container | new `zigbee2mqtt` container at `172.18.4.5` |
+| Protocol to dongle | EZSP (inside HA process) | EZSP (inside Z2M process) |
+| MQTT broker role | Idle / infrastructure only | Active — Z2M publishes, HA subscribes |
+| HA integration | ZHA (built-in) | MQTT Integration + MQTT Discovery |
+| Entity creation | ZHA creates entities automatically | Z2M Discovery payloads → HA auto-creates entities |
+| Debugging | HA internal logs only | `mosquitto_sub -t '#'` to inspect all live data |
+
+### Summary of docker-compose changes needed
+
+1. Add `zigbee2mqtt` service at `172.18.4.5` with `privileged: true` and `/dev/ttyUSB0` device
+2. Remove USB device passthrough from `homeassistant`
+3. Remove `privileged: true` from `homeassistant` (no longer needs raw USB)
+4. Add `tailscale` service at `172.18.4.10` for VPN mobile access (optional)
+5. Add `cloudflared` service at `172.18.4.11` for proxy mobile access (optional)
+6. Add `zigbee2mqtt-data`, `tailscale-state` volumes as needed
+7. Set `TS_AUTH_KEY` and `CF_TUNNEL_TOKEN` in Balena Cloud environment variables
 
 ---
 
