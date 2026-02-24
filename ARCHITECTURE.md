@@ -188,6 +188,8 @@ WC    --> NIC     : NetworkManager
 
 ## 4. Energy Data Flow
 
+> **Key distinction:** ZHA (Zigbee Home Automation) runs **inside** the Home Assistant process and communicates directly with the USB coordinator over serial. It does **not** route through the MQTT broker. MQTT is parallel infrastructure for non-Zigbee devices. Both paths converge at the HA internal event bus, which feeds InfluxDB.
+
 This sequence diagram traces the complete journey of an energy measurement — from a physical Zigbee meter through to the InfluxDB UI rendered in a browser.
 
 ```plantuml
@@ -200,39 +202,45 @@ skinparam BoxPadding 10
 title Energy Data Flow: Zigbee Meter → InfluxDB → Dashboard
 
 participant "Zigbee\nSmart Meter" as Z
-participant "ZHA Integration\n(inside HA)" as ZHA
-participant "MQTT Broker\n172.18.4.7:1883" as MQTT
-participant "Home Assistant\n172.18.4.2:8123" as HA
+participant "ZHA Integration\n(inside HA process)" as ZHA
+participant "HA Internal\nEvent Bus" as BUS
+participant "InfluxDB Integration\n(inside HA process)" as INFLUXINT
 participant "InfluxDB 2.7\n172.18.4.3:8086" as INFLUX
 participant "Nginx Proxy\n:80" as NGINX
 participant "Browser /\nMobile App" as USER
 
-== Energy measurement captured ==
-Z    ->  ZHA   : IEEE 802.15.4 frame\n(power W, voltage V, current A, energy kWh)
-ZHA  ->  MQTT  : Publish to Zigbee event topic
-MQTT ->  HA    : Deliver to MQTT subscriber (callback)
-HA   ->  HA    : Update sensor.* entity state\ne.g. sensor.living_room_power = 342 W
+== Path A: Zigbee → ZHA (MQTT is NOT involved) ==
+Z      ->  ZHA      : IEEE 802.15.4 radio frame\n(power W, voltage V, current A, energy kWh)
+note right of ZHA
+  ZHA decodes the frame via
+  the USB coordinator serial
+  protocol (EZSP/Zigbee stack).
+  This is entirely internal to HA.
+  MQTT broker is never touched.
+end note
+ZHA    ->  BUS      : state_changed event\ne.g. sensor.meter_power = 342 W
 
-== Sync to InfluxDB (real-time, on state change) ==
-HA   ->  INFLUX : POST /api/v2/write\nAuthorization: Token <INFLUX_TOKEN>\nLine protocol: measurement,entity_id=...\nvalue=342.0
-INFLUX --> HA   : HTTP 204 No Content
+== Path B (parallel): MQTT devices feed the same bus ==
+note over BUS
+  Non-Zigbee devices (e.g. ESP sensors, Shelly relays)
+  publish to Mosquitto (172.18.4.7:1883).
+  HA MQTT integration creates sensor.* entities from
+  those topics and fires the same state_changed events.
+end note
 
-== User queries dashboard ==
+== InfluxDB integration listens on the event bus ==
+BUS    ->  INFLUXINT : state_changed (domain = sensor)\nfiltered by: include.domains = [sensor]\nin configuration.yaml
+INFLUXINT -> INFLUX  : POST /api/v2/write\nAuthorization: Token <INFLUX_TOKEN>\norg=hems  bucket=home_assistant\nLine protocol: sensor,entity_id=meter_power value=342.0
+INFLUX --> INFLUXINT : HTTP 204 No Content
+
+== User queries the stored data ==
 USER ->  NGINX  : GET /influx/
-NGINX -> INFLUX : GET / (path rewritten, sub_filter applied)
-INFLUX --> USER : InfluxDB UI (HTML + JS)\nwith /influx/ base path injected by Nginx
+NGINX -> INFLUX : GET / (path rewritten by sub_filter)
+INFLUX --> USER : InfluxDB UI (HTML + JS)
 
-USER ->  NGINX  : POST /influx/api/v2/query\n(Flux query)
+USER ->  NGINX  : POST /influx/api/v2/query (Flux)
 NGINX -> INFLUX : POST /api/v2/query
 INFLUX --> USER : JSON time-series result
-
-== LED health indicators (parallel, every 2 s) ==
-note over ZHA, HA
-  led-status container polls independently:
-  • ping 172.18.4.2  → GPIO 17 (HA health)
-  • ping 8.8.8.8     → GPIO 27 (WAN health)
-  • read HA log file → GPIO 22 (ERROR present)
-end note
 
 @enduml
 ```

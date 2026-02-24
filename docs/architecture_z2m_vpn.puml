@@ -1,0 +1,195 @@
+@startuml HEMS_Z2M_VPN_Architecture
+!theme plain
+skinparam defaultTextAlignment center
+skinparam componentStyle rectangle
+skinparam linetype polyline
+skinparam ArrowFontSize 9
+skinparam ComponentFontSize 10
+skinparam PackageFontSize 11
+skinparam PackageBorderThickness 2
+skinparam ComponentBorderThickness 1.5
+skinparam ArrowThickness 1.5
+
+skinparam package {
+  BackgroundColor #f8f9fa
+  BorderColor     #6c757d
+  FontStyle       bold
+}
+
+skinparam component {
+  BackgroundColor #1a1a2e
+  FontColor       #ffffff
+  BorderColor     #444
+}
+
+skinparam cloud {
+  BackgroundColor #4a235a
+  FontColor       #ffffff
+  BorderColor     #7d3c98
+}
+
+skinparam actor {
+  BackgroundColor #1a5276
+  FontColor       #ffffff
+  BorderColor     #2980b9
+}
+
+left to right direction
+
+' =====================================================================
+' COLUMN 1 — PHYSICAL LAYER
+' =====================================================================
+
+package "Physical Layer" as PHYS {
+
+  component "Grid Smart Meter\n(S0 Pulse LED)\n1000 pulses = 1 kWh" as METER
+
+  component "Frient SMSZB-120\nZigbee Blink Counter\nReads S0 pulse output\nTransmits via Zigbee" as FRIENT
+
+  component "Zigbee USB Dongle\nSonoff ZBDongle-E\nChip: EFR32MG21\nProtocol: USB serial / EZSP" as DONGLE
+
+  METER -down-> FRIENT  : S0 pulse wire\n(physical connection)
+  FRIENT -down-> DONGLE : IEEE 802.15.4\n(Zigbee radio)
+}
+
+' =====================================================================
+' COLUMN 2 — DOCKER BRIDGE NETWORK
+' =====================================================================
+
+package "Raspberry Pi 5  ·  BalenaOS" as RPI {
+
+  package "hems  ·  Docker Bridge Network  ·  172.18.4.0/24" as BRIDGE {
+
+    ' --- ZIGBEE2MQTT (NEW — replaces ZHA, now owns USB dongle) ---
+    component "zigbee2mqtt\n172.18.4.5\n──────────────────\nkoenkk/zigbee2mqtt\nOwns USB dongle\n(privileged: true)\nAdapter: ezsp (EFR32MG21)\n──────────────────\nPublishes:\n  zigbee2mqtt/<device>\n  {\"power\":342,\"energy\":1234.5}\n──────────────────\nMQTT Discovery:\n  homeassistant/sensor/\n  <device>/<field>/config\n  → HA auto-creates entities\n──────────────────\nVolume: zigbee2mqtt-data\nConfig via env vars:\n  MQTT_SERVER: 172.18.4.7\n  HOMEASSISTANT: true\n  SERIAL_ADAPTER: ezsp" as Z2M
+
+    ' --- NGINX (entry point — now also handles HTTPS) ---
+    component "nginx-reverse-proxy\n172.18.4.4 : 80 / 443\n──────────────────\n/              → HA  172.18.4.2:8123\n/influx/       → InfluxDB  172.18.4.3:8086\n/configurator/ → Configurator  172.18.4.6:3218\nTCP :7845      → eesmart-d2l:7845\n──────────────────\nOptional TLS:\n  listen 443 ssl\n  ssl_certificate fullchain.pem\n  (Let's Encrypt / self-signed)" as NGINX
+
+    ' --- HOME ASSISTANT (core of the system) ---
+    package "Home Assistant  ·  172.18.4.2 : 8123\nhomeassistant/home-assistant:2025.3  ·  Volume: hass-config" as HA {
+
+      component "MQTT Integration\nBroker: 172.18.4.7:1883\nConfigured via HA UI\n──────────────────\nMQTT Discovery: ENABLED\nSubscribes:\n  zigbee2mqtt/#\n  homeassistant/#\n──────────────────\nAuto-creates sensor.*\nentities from Discovery\npayloads published by Z2M\n──────────────────\n[PRIMARY ACTIVE PATH]\n(ZHA integration removed)" as MQTTINT
+
+      component "HA State Machine\nsensor.frient_blink_counter_power\nsensor.frient_blink_counter_energy\n(auto-created via MQTT Discovery)" as STATE
+
+      component "HA Internal Event Bus\nFires state_changed\non every entity update" as BUS
+
+      component "InfluxDB Integration\n──────────────────\nconfiguration.yaml:\n  api_version: 2\n  host: 172.18.4.3\n  port: 8086\n  token: INFLUX_TOKEN\n  org: hems\n  bucket: home_assistant\n  include:\n    domains: [sensor]" as IINT
+
+      MQTTINT -right-> STATE : creates + updates\nsensor.* entities\n(Discovery + live payloads)
+      STATE   -right-> BUS   : fires state_changed\nfor every update
+      BUS     -right-> IINT  : delivers event\n(domain=sensor\npasses filter)
+    }
+
+    ' --- INFLUXDB ---
+    component "InfluxDB 2.7\n172.18.4.3 : 8086\n──────────────────\norg    = hems\nbucket = home_assistant\nVolume: influxdb-data\n→ /var/lib/influxdb2" as INFLUX
+
+    ' --- HASS CONFIGURATOR ---
+    component "hass-configurator\n172.18.4.6 : 3218\n──────────────────\nShares hass-config volume\nwith Home Assistant.\nBrowser-based editor for\nconfiguration.yaml,\nautomations, scripts." as CONF
+
+    ' --- MQTT BROKER (NOW ACTIVE — Z2M is publisher, HA is subscriber) ---
+    component "Mosquitto MQTT Broker\n172.18.4.7 : 1883\n──────────────────\nallow_anonymous: true\npersistence: true\nVolume: mosquitto\n→ /mosquitto/data\n──────────────────\n[NOW ACTIVE]\nPublisher: zigbee2mqtt\nSubscriber: HA MQTT Integration\nTopics:\n  zigbee2mqtt/#\n  homeassistant/#" as MQTT
+
+    ' --- LED STATUS ---
+    component "led-status\n172.18.4.9\nUbuntu + gpiozero\n──────────────────\nGPIO 17 → HA health\n  ping 172.18.4.2\nGPIO 27 → WAN health\n  ping 8.8.8.8\nGPIO 22 → Error state\n  reads HA log for ERROR\nPoll: every 2 seconds\nVolume: hass-config (log read)" as LEDS
+
+    ' --- TAILSCALE VPN (NEW) ---
+    component "tailscale\n172.18.4.10\n──────────────────\ntailscale/tailscale\nAuth: TS_AUTH_KEY (Balena env)\nHostname: hems-pi\nTailscale IP: 100.64.x.x\n──────────────────\n--advertise-routes\n  172.18.4.0/24\n──────────────────\nVolume: tailscale-state\nCaps: NET_ADMIN, SYS_MODULE\nDevice: /dev/net/tun" as TAIL
+
+    ' --- CLOUDFLARE TUNNEL (NEW — proxy path) ---
+    component "cloudflared\n172.18.4.11\n──────────────────\ncloudflare/cloudflared\nTUNNEL_TOKEN (Balena env)\n──────────────────\nOutbound HTTPS tunnel only\nNo inbound port needed\nTLS terminated at CF edge\nhttps://hems.yourdomain.com\n→ Nginx 172.18.4.4:80\n──────────────────\nFree tier sufficient" as CF
+
+  }
+
+  ' --- HOST NETWORK SERVICES ---
+  package "Host Network  (no bridge IP)" as HOSTNET {
+
+    component "system-manager\nPython 3 · Alpine\n──────────────────\nLoop every 30 s:\n1. Stop wifi-repeater @ 10 min\n2. Restart HA on new releaseId\n   (2 min grace period)\n3. Reboot if internet down 30 min\n──────────────────\nVolume: /data\n  restartLog.txt\n  version.txt" as SM
+
+    component "wifi-connect\nBalena binary v4.11.84\n──────────────────\nOn boot: checks iwgetid -r\nIf no WiFi → open captive\nportal for SSID + password\nentry. Needs: NET_ADMIN,\nD-Bus access." as WIFIC
+
+  }
+
+}
+
+' =====================================================================
+' COLUMN 3 — CLOUD + EXTERNAL
+' =====================================================================
+
+cloud "Balena Cloud\nFleet: SmartCORE\n(raspberrypi5)\n──────────────────\nOTA updates\nEnv var injection:\n  TS_AUTH_KEY\n  CF_TUNNEL_TOKEN\n  INFLUX_TOKEN\nRemote monitoring" as BALENA
+
+cloud "eesmart-d2l\nExternal energy service\nPort 7845 (TCP)\nProxied by Nginx stream block.\nNot yet defined in compose." as EESMART
+
+cloud "Internet\n(8.8.8.8 / google.com)\nWAN health check target" as INET
+
+cloud "Tailscale Network\ntailscale.com\n──────────────────\nWireGuard mesh VPN\nCoordination server\nDirect P2P tunnel\n(DERP relay fallback)\nPi Tailscale IP: 100.64.x.x" as TSCLOUD
+
+cloud "Cloudflare Edge\n──────────────────\nhttps://hems.yourdomain.com\nGlobal CDN + TLS\nDDoS protection\nFree tunnel tier\nNo port forwarding needed" as CFCLOUD
+
+' =====================================================================
+' COLUMN 4 — USER ACCESS
+' =====================================================================
+
+package "User Access" as USERS {
+
+  actor "Browser\n(local network\nhttp://<pi-ip>:80)" as BROWSER
+
+  actor "Mobile App\niOS / Android\n(external / 4G)\n──────────────────\nPath A: Tailscale\n  install Tailscale app\n  join same account\nPath B: Cloudflare proxy\n  navigate to\n  hems.yourdomain.com" as MOBILE
+
+}
+
+' =====================================================================
+' CONNECTIONS
+' =====================================================================
+
+' Physical → Zigbee2MQTT (USB ownership transferred from HA to Z2M)
+DONGLE -down-> Z2M : USB passthrough\n(zigbee2mqtt: privileged: true\ndevice: /dev/ttyUSB0\nin docker-compose.yml)\n\n[NOTE: HA no longer\nowns the USB dongle.\nZHA integration removed.]
+
+' Zigbee2MQTT → MQTT Broker → HA (now the active Zigbee data path)
+Z2M -right-> MQTT : MQTT publish\n──────────────\nLive readings:\nzigbee2mqtt/frient_blink_counter\n{\"power\":342,\"energy\":1234.5}\n──────────────\nDiscovery config:\nhomeassistant/sensor/\nfrient_blink_counter/power/config\n{\"state_topic\":\"zigbee2mqtt/...\",\n\"value_template\":\"{{value_json.power}}\"}
+
+MQTT -right-> MQTTINT : pushes subscribed\ntopic payloads\n+ Discovery configs\n→ HA auto-creates\nsensor.* entities
+
+' InfluxDB write
+IINT -down-> INFLUX : HTTP POST /api/v2/write\nContent-Type: text/plain\nAuthorization: Token <INFLUX_TOKEN>\n\nLine protocol example:\nsensor,entity_id=frient_blink_counter_power value=342.0
+
+' Nginx routes
+NGINX -down-> HA     : reverse proxy\n+ WebSocket upgrade
+NGINX -down-> INFLUX : reverse proxy\n+ HTML/JS path rewriting\n(sub_filter)
+NGINX -down-> CONF   : reverse proxy
+
+' Nginx external stream
+NGINX -right-> EESMART : TCP stream\nport 7845
+
+' System manager → Balena Supervisor
+SM -up-> BALENA : Balena Supervisor REST API\nauto-injected:\n  BALENA_SUPERVISOR_ADDRESS\n  BALENA_SUPERVISOR_API_KEY\n  BALENA_APP_ID
+
+' LED health checks
+LEDS ..> HA     : ICMP ping 172.18.4.2\n→ GPIO 17 on/off
+LEDS ..> INET   : ICMP ping 8.8.8.8\n→ GPIO 27 on/off
+
+' iptables bridge (system-manager)
+SM ..> BRIDGE : iptables rule (iptables.sh)\n172.18.4.0/24 ↔ 10.42.0.0/24\nvia wlan0 (after 180s delay)
+
+' Tailscale tunnel to coordination server
+TAIL -up-> TSCLOUD : WireGuard UDP\n(port 41641 outbound)\nCoordination + P2P mesh
+
+' Cloudflare tunnel to CF edge
+CF -up-> CFCLOUD : outbound HTTPS tunnel\n(no inbound port)\nTLS terminated at edge
+
+' Cloudflare routes to Nginx
+CFCLOUD -right-> NGINX : https://hems.yourdomain.com\n→ CF edge → cloudflared\n→ Nginx :80
+
+' User access — local browser
+BROWSER -up-> NGINX : http://<pi-local-ip>:80
+
+' User access — mobile via Tailscale VPN
+MOBILE -up-> TSCLOUD : Path A: Tailscale app\n(iOS / Android)\nWireGuard P2P tunnel
+TSCLOUD -up-> TAIL : routed to Pi\n(100.64.x.x → 172.18.4.0/24)
+TAIL -right-> NGINX : http://100.64.x.x:80\n(Pi Tailscale IP → Nginx :80)
+
+' User access — mobile via Cloudflare proxy
+MOBILE -up-> CFCLOUD : Path B: browser / HA app\nhttps://hems.yourdomain.com\n(DNS → Cloudflare edge)
+
+@enduml
