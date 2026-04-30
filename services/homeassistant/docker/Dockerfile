@@ -1,4 +1,4 @@
-FROM homeassistant/home-assistant:2025.3
+FROM ghcr.io/home-assistant/home-assistant:stable
 
 COPY docker/start.sh /tmp/start.sh
 
