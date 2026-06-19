@@ -1,4 +1,4 @@
-what import gpiozero.pins.lgpio
+import gpiozero.pins.lgpio
 import lgpio
 import os
 import time
