@@ -14,7 +14,7 @@ logging.basicConfig(
 
 # Loop round and check services
 
-# Stop wifi-repeater 10 minutes after startup
+# Stop the wifi-connect captive portal 10 minutes after startup
 # Restart hass if updated
 # Ping internet and restart box if not responding for ~30 mins
 
@@ -26,7 +26,7 @@ logging.info("Watchdog script started")
 
 while True:
 
-    wifi_started_at = watchdog_utils.check_wifi_repeater_n_stop(wifi_started_at)
+    wifi_started_at = watchdog_utils.check_wifi_portal_n_stop(wifi_started_at)
 
     version_changed_at = watchdog_utils.restart_hass(version_changed_at)
 

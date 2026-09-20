@@ -18,9 +18,11 @@ def logToFile(message):
     logFile.close()
 
 
-def check_wifi_repeater_n_stop(wifi_started_at):
-    # Check wifi repeater is stopped if necessary
-    # Can we also check if it needs to run and start if so???
+def check_wifi_portal_n_stop(wifi_started_at):
+    # Stop the WiFi captive-portal service once it has been up for PORTAL_MAX_MINUTES, so the
+    # box does not broadcast a setup hotspot indefinitely. It starts again on the next boot.
+    if constants.PORTAL_MAX_MINUTES <= 0:
+        return wifi_started_at
     try:
         response = requests.get(constants.STATUS_URL)
         response.raise_for_status()
@@ -30,9 +32,9 @@ def check_wifi_repeater_n_stop(wifi_started_at):
         logging.error(f'Other error occurred: {err}')
     else:
         delta_t = timedelta(seconds=0)
-        for container in response.json()["containers"]:            
-            ####################
-            if container["serviceName"] == "wifi-repeater":
+        wifi_running = False
+        for container in response.json()["containers"]:
+            if container["serviceName"] == constants.WIFI_SERVICE:
                 wifi_running = container["status"] == "Running"
                 if wifi_started_at:
                     delta_t = datetime.now() - wifi_started_at
@@ -40,15 +42,12 @@ def check_wifi_repeater_n_stop(wifi_started_at):
                     wifi_started_at = datetime.now()
 
         if wifi_running:
-            logging.info(str(delta_t) + " since wifi-repeater started.")
+            logging.info(str(delta_t) + " since " + constants.WIFI_SERVICE + " started.")
         else:
-            logging.info("wifi-repeater is not running")
-        if wifi_running and delta_t > timedelta(minutes=10):
-            #########################
-            ## TODO: Log this in a file somewhere with timestamp
-            ##########################
-            logging.debug("Past delta t, stop container")
-            response = requests.post(constants.STOP_URL, data="{\"serviceName\": \"wifi-repeater\"}", headers={"Content-Type": "application/json"})
+            logging.info(constants.WIFI_SERVICE + " is not running")
+        if wifi_running and delta_t > timedelta(minutes=constants.PORTAL_MAX_MINUTES):
+            logToFile("Stopping " + constants.WIFI_SERVICE + " after " + str(delta_t))
+            response = requests.post(constants.STOP_URL, json={"serviceName": constants.WIFI_SERVICE})
             wifi_started_at = None
 
     return wifi_started_at
@@ -56,6 +55,7 @@ def check_wifi_repeater_n_stop(wifi_started_at):
 
 def restart_hass(version_changed_at):
     # Check version, if it's updated, restart home assistant
+    version = None
     try:
         response = requests.get(constants.APPLICATION_URL)
         response.raise_for_status()
