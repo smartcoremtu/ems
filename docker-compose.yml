@@ -77,7 +77,7 @@ services:
     network_mode: host
     volumes: 
       - system-manager:/data
-    restart: on_failure
+    restart: on-failure
     labels:
       io.balena.features.supervisor-api: '1'
 
