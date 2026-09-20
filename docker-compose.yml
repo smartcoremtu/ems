@@ -37,8 +37,7 @@ services:
   hass-configurator:
     image: "causticlab/hass-configurator-docker:latest"
     restart: always
-    ports:
-      - "3218:3218"
+    # Not published on the host: reach it through nginx at /configurator/, which adds the login.
     volumes:
       - 'hass-config:/hass-config'
     environment:
