@@ -29,7 +29,8 @@ This guide covers deploying and testing the SmartCORE HEMS on a Raspberry Pi 5 w
 2. Select your network configuration:
    - **Ethernet** (easiest for testing)
    - Or configure WiFi credentials
-3. Download the BalenaOS image
+3. Download the BalenaOS image. Choose the **Production** edition for any box that leaves the lab: a
+   **Development** image allows root SSH on port 22222 with no password to anyone on the same network.
 4. Flash it to your SD card using [Balena Etcher](https://etcher.balena.io/)
 5. Insert the SD card into your Pi and power on
 6. Wait for the device to appear online in the dashboard
@@ -43,8 +44,10 @@ In Balena Dashboard → Your Fleet → **Variables**, add:
 | Variable | Value |
 |----------|-------|
 | `INFLUX_TOKEN` | Generate a secure token string |
-| `CONFIG_USER` | Your desired username (e.g., `admin`) |
-| `CONFIG_PASSWORD` | Your desired password |
+| `CONFIG_USER` | Username for the configurator login (e.g., `admin`). **Required** — `/configurator/` is refused without it |
+| `CONFIG_PASSWORD` | Password for the configurator login. **Required** |
+| `PORTAL_PASSPHRASE` | WPA2 passphrase (8+ characters) for the WiFi setup hotspot. **Set it** — without it the hotspot is open |
+| `PORTAL_MAX_MINUTES` | Optional. Minutes the setup hotspot may stay up after boot before the watchdog stops it (default `10`, `0` = never) |
 
 ---
 
@@ -93,7 +96,8 @@ Find your device's IP address in Balena Dashboard (or use `<device-uuid>.balena-
 | Interface | URL | Credentials |
 |-----------|-----|-------------|
 | **Home Assistant** | `http://<device-ip>/` | Create account on first visit |
-| **InfluxDB** | `http://<device-ip>/influx/` | Basic auth (CONFIG_USER/PASSWORD) |
+| **InfluxDB** | `http://<device-ip>/influx/` | InfluxDB login / `INFLUX_TOKEN` |
+| **Configurator** | `http://<device-ip>/configurator/` | Basic auth (`CONFIG_USER` / `CONFIG_PASSWORD`) |
 
 ---
 
@@ -139,7 +143,7 @@ Internal container network: `172.18.4.0/24`
 | homeassistant | 172.18.4.2 | 8123 |
 | influxdb | 172.18.4.3 | 8086 |
 | nginx-reverse-proxy | 172.18.4.4 | 80 |
-| hass-configurator | 172.18.4.6 | 3218 |
+| hass-configurator | 172.18.4.6 | 3218 (internal only — use `/configurator/` on port 80) |
 | mqtt | 172.18.4.7 | 1883 |
 | led-status | 172.18.4.9 | - |
 
@@ -152,7 +156,9 @@ Internal container network: `172.18.4.0/24`
 | Services not starting | Check logs in Balena Dashboard for specific errors |
 | Can't access web UI | Verify nginx-reverse-proxy is running; check port 80 is exposed |
 | No network between containers | Verify `hems` network exists; restart all services |
-| WiFi portal not appearing | wifi-connect only runs for first 10 minutes after boot |
+| WiFi portal not appearing | The portal only starts when the box has no network at all (no Ethernet/WiFi default route), and the watchdog stops it 10 minutes after boot. Reboot to get another 10 minutes |
+| `/configurator/` returns 403/500 | `CONFIG_USER` / `CONFIG_PASSWORD` fleet variables are not set |
+| system-manager stuck in "Created", supervisor unhealthy | `exec /tmp/start.sh: permission denied` — the script lost its executable bit; fixed in the Dockerfile, rebuild the release |
 | Home Assistant not responding | Check homeassistant logs; may need more time on first boot |
 | InfluxDB authentication failed | Verify INFLUX_TOKEN environment variable is set |
 
