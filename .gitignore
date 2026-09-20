@@ -209,3 +209,7 @@ __marimo__/
 
 # Exported device data (household energy data - never commit)
 /data/
+
+# Analysis virtualenv and caches
+/analysis/.venv/
+__pycache__/

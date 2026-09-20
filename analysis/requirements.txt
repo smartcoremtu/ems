@@ -1,0 +1,4 @@
+pandas>=2.2
+numpy>=2.0
+xlsxwriter>=3.2
+openpyxl>=3.1
