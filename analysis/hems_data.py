@@ -73,7 +73,7 @@ def _counter_to_cumulative(s: pd.Series) -> pd.Series:
 
 
 def load_site(folder: Path, cache: Path | None = None) -> dict:
-    """Return {'minute': 1-min frame, 'energy30': 30-min kWh frame, 'totals': counter deltas,
+    """Return {'minute': 1-min frame, 'energy15' / 'energy30': 15- and 30-min kWh frames, 'totals': counter deltas,
     'states': dict, 'inventory': per-entity point counts}. All indexes are Europe/Dublin."""
     if cache and cache.exists():
         with open(cache, "rb") as f:
@@ -107,11 +107,12 @@ def load_site(folder: Path, cache: Path | None = None) -> dict:
     cum = pd.DataFrame({k: _counter_to_cumulative(raw[v]).reindex(
         raw[v].index.union(grid)).ffill().reindex(grid) for k, v in TODAY.items()})
     cum.index = cum.index.tz_convert(TZ)
-    energy30 = cum.resample("30min").last().diff().iloc[1:].clip(lower=0)
+    energy15 = cum.resample("15min").last().diff().iloc[1:].clip(lower=0)
+    energy30 = energy15.resample("30min").sum()          # smart-meter resolution, used for tariffs
 
     totals = {k: float(raw[v].iloc[-1] - raw[v].iloc[0]) for k, v in TOTAL.items()}
     lifetime = {k: float(raw[v].iloc[-1]) for k, v in TOTAL.items()}
-    out = {"minute": minute, "energy30": energy30, "totals": totals, "lifetime": lifetime,
+    out = {"minute": minute, "energy15": energy15, "energy30": energy30, "totals": totals, "lifetime": lifetime,
            "states": {n: read_states(folder, n) for n in ("device_state", "device_fault")},
            "inventory": pd.DataFrame(inventory)}
     if cache:

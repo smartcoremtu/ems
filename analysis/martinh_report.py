@@ -187,7 +187,7 @@ def build_workbook(R: dict) -> None:
     # Sheets are created up front in display order, then filled in dependency order (charts on
     # the narrative sheets point at tables on other sheets).
     names = ["Dashboard", "Why an EMS", "Tariff", "Self-consumption", "Day profile", "Daily", "Heatmaps",
-             "Battery & EV", "Solar", "Peaks & baseload", "Methods", "Data_30min", "Data_daily",
+             "Battery & EV", "Solar", "Peaks & baseload", "Methods", "Data_15min", "Data_daily",
              "Data_monthly", "Dictionary", "Tariff_calc"]
     for n in names:
         B.wb.add_worksheet(n)
@@ -619,7 +619,7 @@ def build_workbook(R: dict) -> None:
         f"Source: InfluxDB export of the MartinH HEMS box, 2026-09-20, 36 Home Assistant inverter entities, about 21 million points. Analysis period: {period}, Europe/Dublin time.",
         f"Coverage: the box wrote data in {k['coverage']:.2%} of minutes. Home Assistant stores a value only when it changes, so power signals are held at their last value (time-weighted 1-minute means); "
         f"minutes with no point from any entity for {15} min are treated as gaps.",
-        "Energy (kWh) comes from the inverter's own daily counters (0.01 kWh resolution) rebuilt across midnight resets and cut into half-hours, the same resolution as an ESB smart meter. "
+        "Energy (kWh) comes from the inverter's own daily counters (0.01 kWh resolution) rebuilt across midnight resets and cut into 15-minute intervals (Data_15min sheet); tariffs and heatmaps sum these to half-hours, the resolution an ESB smart meter bills at. "
         "They agree with the inverter's lifetime counters to about 1-2 % and with integrated power to about 1 % (table below). Expect the supplier's bill to differ by a similar margin.",
         "Sign convention: inverter_grid_power is positive when exporting. Battery power is NOT metered on this site: it is estimated as inverter AC power + inverter losses - solar DC power, "
         "so battery figures include conversion losses and are indicative. Car charging is inferred from house load above 5 kW. All 'est.' figures carry perhaps +/-10 %.",
@@ -651,15 +651,15 @@ def build_workbook(R: dict) -> None:
     for name_, url in list(T.SOURCES.values()) + list(extra.values()):
         wq.write(r, 0, name_, B.f(text_wrap=True)); wq.write_url(r, 1, url, B.f(font_color=LOAD, underline=1), url); r += 1
 
-    # ================================ Data_30min / Dictionary ===================================
-    d30 = R["data30"].copy(); d30.index = d30.index.tz_localize(None); d30.index.name = "Half-hour starting (local)"
+    # ================================ Data_15min / Dictionary ===================================
+    d30 = R["data15"].copy(); d30.index = d30.index.tz_localize(None); d30.index.name = "15 min starting (local)"
     h30 = {"import": "Grid import kWh", "export": "Grid export kWh", "load": "Used kWh", "pv": "Solar kWh", "losses": "Losses kWh", "self_used_pv": "Solar used at home kWh",
            "grid_power": "Grid W (+export)", "load_power": "Load W", "pv_power": "Solar DC W", "power": "Inverter AC W", "pv1_power": "String 1 W", "pv2_power": "String 2 W",
            "power_losses": "Inverter losses W", "l1_voltage": "Voltage V", "l1_current": "Current A", "frequency": "Frequency Hz", "pv1_voltage": "String 1 V", "pv1_current": "String 1 A",
            "pv2_voltage": "String 2 V", "pv2_current": "String 2 A", "radiator_temperature": "Heatsink temp C", "room_temperature": "Inverter room temp C",
            "battery_est": "Battery W est. (+discharge)", "import_w": "Import W", "export_w": "Export W", "l1_voltage_max": "Voltage max V"}
-    w30 = B.sheet("Data_30min", "All signals at half-hour resolution",
-                  "The 36 source files condensed to smart-meter resolution: energy per half-hour from the inverter counters, and the mean of every live signal. "
+    w30 = B.sheet("Data_15min", "All signals at 15-minute resolution",
+                  "The 36 source files condensed to 15-minute intervals: energy per 15 min from the inverter counters (0.01 kWh steps), and the mean of every live signal. "
                   "(The raw 21 million 5-second points exceed Excel's row limit; they stay in the .csv.gz files.)", tab=MUTED, width=12, first_col_width=20, ncols=len(d30.columns))
     w30.set_row(3, 45)
     _, e30 = B.table(w30, 3, 0, d30, headers=h30, index_fmt="yyyy-mm-dd hh:mm", default="0.00",

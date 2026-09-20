@@ -15,7 +15,7 @@ Output: `..\data\MartinH_Energy_Report.xlsx` (git-ignored).
 
 | File | Role |
 |---|---|
-| `hems_data.py` | Load + clean: write-on-change signals → time-weighted 1-min means, daily counters → 30-min kWh |
+| `hems_data.py` | Load + clean: write-on-change signals → time-weighted 1-min means, daily counters → 15-min kWh (summed to 30 min for tariffs) |
 | `metrics.py` | KPIs, tariff engine, EV sessions, battery estimate, scenarios. Assumptions are constants at the top |
 | `tariffs.py` | Irish plans (inc. VAT) with sources and research date — **re-check before reuse, rates move** |
 | `martinh_report.py` | Workbook writer (xlsxwriter, native Excel charts) |

@@ -40,9 +40,13 @@ def build(site: dict) -> dict:
     m["ev_on"] = (m["load_power"] > EV_LOAD_W).fillna(False).astype(bool)
 
     e["self_used_pv"] = (e["pv"] - e["export"]).clip(lower=0)
-    half = m.resample("30min").mean(numeric_only=True)
-    half["l1_voltage_max"] = m["l1_voltage"].resample("30min").max()
-    data30 = e.join(half.drop(columns=["alive", "ev_on"]), how="left")
+    # The data sheet is at 15 min; tariffs and heatmaps stay at the 30-min smart-meter resolution.
+    e15 = site["energy15"]
+    e15 = e15[(e15.index >= first) & (e15.index < last)].astype("float64")
+    e15["self_used_pv"] = (e15["pv"] - e15["export"]).clip(lower=0)
+    quarter = m.resample("15min").mean(numeric_only=True)
+    quarter["l1_voltage_max"] = m["l1_voltage"].resample("15min").max()
+    data15 = e15.join(quarter.drop(columns=["alive", "ev_on"]), how="left")
 
     tot = e.sum()
     k = {"days": days, "start": first, "end": last - pd.Timedelta(days=1)}
@@ -287,7 +291,7 @@ def build(site: dict) -> dict:
     recon_power = pd.Series(integ) / tot[list(integ)] - 1
     k["coverage"] = float(m["alive"].mean())
 
-    return dict(k=k, m=m, e=e, data30=data30, daily=daily, monthly=monthly, prof=prof, tprof=tprof,
+    return dict(k=k, m=m, e=e, data15=data15, daily=daily, monthly=monthly, prof=prof, tprof=tprof,
                 plans=plans, base=base, future=future, flat=flat, expensive=expensive,
                 low_by_hour=low_by_hour, fault_table=fault_table, sessions=sessions,
                 weekly_ev=weekly_ev, duration=duration, peaks=peaks, vhist=vhist, states=states,
