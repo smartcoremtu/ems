@@ -12,6 +12,10 @@ RUN pip install --break-system-packages -r /tmp/requirements.txt
 RUN mkdir -p /tmp/scripts
 COPY scripts/* /tmp/scripts/
 
-COPY start.sh /tmp/start.sh 
+COPY start.sh /tmp/start.sh
+
+# The scripts are exec'd directly. Git on Windows does not record the executable bit, so
+# set it here rather than relying on the mode of the checkout the release was pushed from.
+RUN chmod +x /tmp/start.sh /tmp/scripts/*.sh /tmp/scripts/watchdog.py
 
 CMD ["/tmp/start.sh"]
