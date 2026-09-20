@@ -206,3 +206,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .claude*
+
+# Exported device data (household energy data - never commit)
+/data/
