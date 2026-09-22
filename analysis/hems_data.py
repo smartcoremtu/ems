@@ -58,12 +58,23 @@ def _minute_mean(s: pd.Series, grid: pd.DatetimeIndex) -> pd.Series:
     return held.resample("1min").mean().reindex(grid)
 
 
+def _despike(s: pd.Series) -> pd.Series:
+    """Drop single bad reads of a counter: a point that jumps away from its neighbours while the
+    next point carries on from the previous one (seen on 25 May 2026: 10.73 -> 12.09 -> 10.75,
+    which would otherwise count as 1.34 kWh of export). A midnight reset is not a spike because
+    the point after it stays low."""
+    prev, nxt = s.shift(), s.shift(-1)
+    spike = (nxt >= prev) & ((s > nxt) | (s < prev))
+    return s[~spike]
+
+
 def _counter_to_cumulative(s: pd.Series) -> pd.Series:
     """Turn a daily-resetting counter into a monotonic cumulative series.
 
     A drop to below half the previous value is the midnight reset (the new value is the energy
     since the reset); any other negative step is a glitch and counts as zero.
     """
+    s = _despike(s)
     step = s.diff()
     reset = (step < 0) & (s < 0.5 * s.shift())
     inc = step.where(step > 0, 0.0)

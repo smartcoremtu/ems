@@ -620,7 +620,8 @@ def build_workbook(R: dict) -> None:
         f"Coverage: the box wrote data in {k['coverage']:.2%} of minutes. Home Assistant stores a value only when it changes, so power signals are held at their last value (time-weighted 1-minute means); "
         f"minutes with no point from any entity for {15} min are treated as gaps.",
         "Energy (kWh) comes from the inverter's own daily counters (0.01 kWh resolution) rebuilt across midnight resets and cut into 15-minute intervals (Data_15min sheet); tariffs and heatmaps sum these to half-hours, the resolution an ESB smart meter bills at. "
-        "They agree with the inverter's lifetime counters to about 1-2 % and with integrated power to about 1 % (table below). Expect the supplier's bill to differ by a similar margin.",
+        "They agree with the inverter's lifetime counters to about 1-2 % and with integrated power to about 1 % (table below). Checked against the ESB smart meter half-hour by half-hour: "
+        "grid import and export agree within 1 % and the bill within about EUR 1 - see MartinH_Validation.xlsx (martinh_validation.py). Solar and house load have no independent meter.",
         "Sign convention: inverter_grid_power is positive when exporting. Battery power is NOT metered on this site: it is estimated as inverter AC power + inverter losses - solar DC power, "
         "so battery figures include conversion losses and are indicative. Car charging is inferred from house load above 5 kW. All 'est.' figures carry perhaps +/-10 %.",
         f"Tariff: the current plan is inferred from the import pattern (cheap 02:00-06:00 window) - the householder confirmed an EV night plan but not the supplier. Rates were researched on {T.RESEARCH_DATE}, "

@@ -19,6 +19,9 @@ Output: `..\data\MartinH_Energy_Report.xlsx` (git-ignored).
 | `metrics.py` | KPIs, tariff engine, EV sessions, battery estimate, scenarios. Assumptions are constants at the top |
 | `tariffs.py` | Irish plans (inc. VAT) with sources and research date — **re-check before reuse, rates move** |
 | `martinh_report.py` | Workbook writer (xlsxwriter, native Excel charts) |
+| `reference_data.py` | Loaders for the reference data: ESB Networks smart-meter HDF file, SolarMan portal workbooks (both are on Irish clock time) |
+| `validation.py` | HEMS vs ESB meter (import/export) and vs SolarMan (data path, battery); effect on the report's headline figures |
+| `martinh_validation.py` | Writes `..\data\MartinH_Validation.xlsx` from `..\data\Broomfield Data\` (needs `openpyxl` to read the SolarMan files) |
 
 Privacy: the input and the report are identifiable household data. Keep them in `data/` (ignored),
 and switch `SITE_LABEL` to the UHIC code before sharing outside the project.
