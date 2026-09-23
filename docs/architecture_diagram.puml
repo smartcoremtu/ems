@@ -1,4 +1,6 @@
 @startuml HEMS_Architecture
+' SmartCORE HEMS - architecture as deployed, September 2026.
+' Render: https://www.plantuml.com/plantuml (paste) or `java -jar plantuml.jar architecture_diagram.puml`
 !theme plain
 skinparam defaultTextAlignment center
 skinparam componentStyle rectangle
@@ -15,164 +17,114 @@ skinparam package {
   BorderColor     #6c757d
   FontStyle       bold
 }
-
 skinparam component {
   BackgroundColor #1a1a2e
   FontColor       #ffffff
   BorderColor     #444
 }
-
 skinparam cloud {
   BackgroundColor #4a235a
   FontColor       #ffffff
   BorderColor     #7d3c98
 }
-
 skinparam actor {
   BackgroundColor #1a5276
-  FontColor       #ffffff
+  FontColor       #0b0b0b
   BorderColor     #2980b9
 }
 
 left to right direction
 
 ' =====================================================================
-' COLUMN 1 — PHYSICAL LAYER
+' SITE EQUIPMENT - differs per site, configured in the HA UI, not in git
 ' =====================================================================
 
-package "Physical Layer" as PHYS {
+package "Site equipment  (one arrangement per site)" as PHYS {
 
-  component "Grid Smart Meter\n(S0 Pulse LED)\n1000 pulses = 1 kWh" as METER
+  component "Solar inverter + Solarman logger\n(Sofar G3, LSW Wi-Fi stick)\nModbus/TCP on the home LAN\n1 site" as SOLARMAN
 
-  component "Frient SMSZB-120\nZigbee Blink Counter\nReads S0 pulse output\nTransmits via Zigbee" as FRIENT
+  component "Sigenergy inverter + battery\nModbus/TCP on the home LAN\n1 site" as SIGEN
 
-  component "Zigbee USB Dongle\nSonoff ZBDongle-E\nChip: EFR32MG21\nProtocol: USB serial / EZSP" as DONGLE
+  component "ESB smart meter\npulse LED, 1000 pulses = 1 kWh" as METER
+  component "frient EMIZB-141\nZigbee meter interface\ncounts the LED pulses" as FRIENT
+  component "Sonoff ZBDongle-E\nEZSP USB coordinator\n/dev/ttyUSB0\n2 sites" as DONGLE
 
-  METER -down-> FRIENT  : S0 pulse wire\n(physical connection)
-  FRIENT -down-> DONGLE : IEEE 802.15.4\n(Zigbee radio)
+  METER  -down-> FRIENT : optical pulse
+  FRIENT -down-> DONGLE : IEEE 802.15.4\n(Zigbee)
 }
 
 ' =====================================================================
-' COLUMN 2 — DOCKER BRIDGE NETWORK
+' THE BOX
 ' =====================================================================
 
-package "Raspberry Pi 5  ·  BalenaOS" as RPI {
+package "Raspberry Pi 5  ·  balenaOS  ·  8 containers" as RPI {
 
-  package "hems  ·  Docker Bridge Network  ·  172.18.4.0/24" as BRIDGE {
+  package "hems  ·  Docker bridge  ·  172.18.4.0/24" as BRIDGE {
 
-    ' --- NGINX (top of bridge, entry point) ---
-    component "nginx-reverse-proxy\n172.18.4.4 : 80\n──────────────────\n/              → HA  172.18.4.2:8123\n/influx/       → InfluxDB  172.18.4.3:8086\n/configurator/ → Configurator  172.18.4.6:3218\nTCP :7845      → eesmart-d2l:7845" as NGINX
+    component "nginx-reverse-proxy\n172.18.4.4 : 80  (published :80)\n──────────────────\n/              → Home Assistant\n/influx/       → InfluxDB UI (path rewrite)\n/configurator/ → configurator, basic auth\n                 CONFIG_USER / CONFIG_PASSWORD\nstream :7845 → eesmart-d2l (undefined)" as NGINX
 
-    ' --- HOME ASSISTANT (core of the system) ---
-    package "Home Assistant  ·  172.18.4.2 : 8123\nhomeassistant/home-assistant:2025.3  ·  Volume: hass-config" as HA {
+    package "Home Assistant  ·  172.18.4.2 : 8123\nghcr.io/home-assistant/home-assistant:2026.6.3  ·  volume hass-config" as HA {
 
-      component "ZHA Integration\nOwns USB dongle via\nUSB privileged passthrough.\nDecodes EZSP → Zigbee clusters.\nNo MQTT in this path." as ZHA
+      component "Integrations (per site, in .storage)\n──────────────────\nsolarman  (HACS custom)\nsigenergy (custom)\nzha       (built-in, owns the dongle)\nenergyid  (custom, sends to hooks.energyid.eu)\n──────────────────\nNo MQTT integration configured" as INTEG
 
-      component "MQTT Integration\nBroker: 172.18.4.7:1883\nConfigured via HA UI.\nStored in .storage/\ncore.config_entries.\nParallel path for future\nWiFi/MQTT devices." as MQTTINT
+      component "State machine + event bus\nevery entity change fires\nstate_changed" as STATE
 
-      component "HA State Machine\nsensor.frient_power\nsensor.frient_energy\n(all source entities live here)" as STATE
+      component "InfluxDB integration\nconfiguration.yaml:\n  host 172.18.4.3  org hems\n  bucket home_assistant\n  token !env_var INFLUX_TOKEN\n  include domains: [sensor]\nwrites on change only" as IINT
 
-      component "HA Internal Event Bus\nFires state_changed\non every entity update" as BUS
-
-      component "InfluxDB Integration\n──────────────────\nconfiguration.yaml:\n  api_version: 2\n  host: 172.18.4.3\n  port: 8086\n  token: INFLUX_TOKEN\n  org: hems\n  bucket: home_assistant\n  include:\n    domains: [sensor]" as IINT
-
-      ZHA     -right-> STATE : creates + updates\nsensor.* entities
-      MQTTINT -right-> STATE : creates + updates\nsensor.* entities\n(parallel path)
-      STATE   -right-> BUS   : fires state_changed\nfor every update
-      BUS     -right-> IINT  : delivers event\n(domain=sensor\npasses filter)
+      INTEG -right-> STATE : sensor.* entities
+      STATE -right-> IINT  : state_changed\n(domain = sensor)
     }
 
-    ' --- INFLUXDB ---
-    component "InfluxDB 2.7\n172.18.4.3 : 8086\n──────────────────\norg    = hems\nbucket = home_assistant\nVolume: influxdb-data\n→ /var/lib/influxdb2" as INFLUX
+    component "InfluxDB 2.7.1\n172.18.4.3 : 8086  (published :8086)\n──────────────────\norg hems · bucket home_assistant\nmeasurement = unit (W, kWh, V ...)\ntag entity_id · field value | state\nvolume influxdb-data" as INFLUX
 
-    ' --- HASS CONFIGURATOR ---
-    component "hass-configurator\n172.18.4.6 : 3218\n──────────────────\nShares hass-config volume\nwith Home Assistant.\nBrowser-based editor for\nconfiguration.yaml,\nautomations, scripts." as CONF
+    component "hass-configurator\n172.18.4.6 : 3218  (NOT published)\n──────────────────\nedits the hass-config volume\nreached only via nginx + login" as CONF
 
-    ' --- MQTT BROKER ---
-    component "Mosquitto MQTT Broker\n172.18.4.7 : 1883\n──────────────────\nallow_anonymous: true\npersistence: true\nVolume: mosquitto\n→ /mosquitto/data\n\nCurrently: no active Zigbee\npublisher. Ready for future\nMQTT devices." as MQTT
+    component "Mosquitto MQTT\n172.18.4.7 : 1883  (published :1883)\n──────────────────\nallow_anonymous true\nIDLE: no publisher, no subscriber\nkept for future MQTT devices" as MQTT
 
-    ' --- LED STATUS (on bridge network, NOT host network) ---
-    component "led-status\n172.18.4.9\nUbuntu + gpiozero\n──────────────────\nGPIO 17 → HA health\n  ping 172.18.4.2\nGPIO 27 → WAN health\n  ping 8.8.8.8\nGPIO 22 → Error state\n  reads HA log for ERROR\nPoll: every 2 seconds\nVolume: hass-config (log read)" as LEDS
-
+    component "led-status\n172.18.4.9\n──────────────────\nGPIO 17  HA reachable   (ping .2)\nGPIO 27  internet        (ping 8.8.8.8)\nGPIO 22  ERROR in HA log\nreads hass-config volume" as LEDS
   }
 
-  ' --- HOST NETWORK SERVICES ---
-  package "Host Network  (no bridge IP)" as HOSTNET {
+  package "Host network  (no bridge IP)" as HOSTNET {
 
-    component "system-manager\nPython 3 · Alpine\n──────────────────\nLoop every 30 s:\n1. Stop wifi-repeater @ 10 min\n2. Restart HA on new releaseId\n   (2 min grace period)\n3. Reboot if internet down 30 min\n──────────────────\nVolume: /data\n  restartLog.txt\n  version.txt" as SM
+    component "system-manager  (Alpine + Python)\n──────────────────\nevery 30 s via Supervisor API:\n1. stop wifi-connect after\n   PORTAL_MAX_MINUTES (10)\n2. restart HA when releaseId changes\n3. reboot after 30 min without internet\niptables.sh: bridge ↔ 10.42.0.0/24 (inert)\nvolume /data: version.txt, restartLog.txt" as SM
 
-    component "wifi-connect\nBalena binary v4.11.84\n──────────────────\nOn boot: checks iwgetid -r\nIf no WiFi → open captive\nportal for SSID + password\nentry. Needs: NET_ADMIN,\nD-Bus access." as WIFIC
-
+    component "wifi-connect  (Debian bookworm)\n──────────────────\non boot, wait ≤60 s for a network\n(default route or Wi-Fi assoc.)\n• network → skip, delete stale AP profile\n• none → hotspot “WiFi Connect”\n  WPA2 PORTAL_PASSPHRASE\n  portal 192.168.42.1:8080\nNET_ADMIN + host D-Bus (NetworkManager)" as WIFIC
   }
-
 }
 
 ' =====================================================================
-' COLUMN 3 — CLOUD + EXTERNAL
+' CLOUD AND PEOPLE
 ' =====================================================================
 
-cloud "Balena Cloud\nFleet: SmartCORE\n(raspberrypi5)\n──────────────────\nOTA updates\nEnv var injection\nRemote monitoring" as BALENA
+cloud "balenaCloud\nfleet smartcoremtu/smartcore\n7 devices\n──────────────────\nreleases (draft → pin → finalize)\nservice variables\nSupervisor API on each device\nssh / tunnel / logs for the team" as BALENA
 
-cloud "eesmart-d2l\nExternal energy service\nPort 7845 (TCP)\nProxied by Nginx stream block.\nNot yet defined in compose." as EESMART
+cloud "EnergyID\nhooks.energyid.eu\n(one site)" as ENERGYID
 
-cloud "Internet\n(8.8.8.8 / google.com)\nWAN health check target" as INET
+actor "Homeowner\nbrowser / HA app\nhome LAN only\nhttp://<pi-ip>/" as USER
 
-' =====================================================================
-' COLUMN 4 — USER ACCESS
-' =====================================================================
-
-package "User Access" as USERS {
-
-  actor "Browser\n(local network\nhttp://<pi-ip>:80)" as BROWSER
-
-  actor "Mobile App\niOS / Android\n(external / 4G)" as MOBILE
-
-  cloud "Nabu Casa Cloud\nHA relay service\nNo port forwarding needed\nSubscription required" as NABU
-
-  cloud "Tailscale VPN\nPeer-to-peer tunnel\nFree tier sufficient\nNeeds new container" as TS
-
-}
+actor "MTU team\nbalena CLI + dashboard" as TEAM
 
 ' =====================================================================
 ' CONNECTIONS
 ' =====================================================================
 
-' Physical → Docker
-DONGLE -down-> ZHA : USB passthrough\n(HA: privileged: true\nin docker-compose.yml)
+SOLARMAN -down-> INTEG : Modbus/TCP\n(solarman)
+SIGEN    -down-> INTEG : Modbus/TCP\n(sigenergy)
+DONGLE   -down-> INTEG : USB serial, EZSP\n(HA privileged: true)
 
-' InfluxDB write
-IINT -down-> INFLUX : HTTP POST /api/v2/write\nContent-Type: text/plain\nAuthorization: Token <INFLUX_TOKEN>\n\nExample line protocol:\nsensor,entity_id=frient_power value=342.0
+IINT -down-> INFLUX : POST /api/v2/write\nline protocol
 
-' Nginx routes
-NGINX -down-> HA     : reverse proxy\n+ WebSocket upgrade
-NGINX -down-> INFLUX : reverse proxy\n+ HTML/JS path rewriting\n(sub_filter)
-NGINX -down-> CONF   : reverse proxy
+NGINX -down-> HA     : proxy + WebSocket
+NGINX -down-> INFLUX : proxy + sub_filter
+NGINX -down-> CONF   : proxy, auth_basic
 
-' Nginx external stream
-NGINX -right-> EESMART : TCP stream\nport 7845
+INTEG -up-> ENERGYID : webhook
 
-' MQTT broker → MQTT Integration inside HA
-MQTT -right-> MQTTINT : pushes subscribed\ntopic payloads
+SM -up-> BALENA : Supervisor REST API\n(127.0.0.1:48484)
+LEDS ..> HA : ICMP
 
-' System manager → Balena Supervisor
-SM -up-> BALENA : Balena Supervisor REST API\nauto-injected:\n  BALENA_SUPERVISOR_ADDRESS\n  BALENA_SUPERVISOR_API_KEY\n  BALENA_APP_ID
-
-' LED health checks
-LEDS ..> HA     : ICMP ping 172.18.4.2\n→ GPIO 17 on/off
-LEDS ..> INET   : ICMP ping 8.8.8.8\n→ GPIO 27 on/off
-
-' iptables bridge (system-manager)
-SM ..> BRIDGE : iptables rule (iptables.sh)\n172.18.4.0/24 ↔ 10.42.0.0/24\nvia wlan0 (after 180s delay)
-
-' User access — local
-BROWSER -up-> NGINX : http://<pi-local-ip>:80
-
-' User access — mobile via Nabu Casa
-MOBILE -up-> NABU : HTTPS encrypted relay\n(Settings → HA Cloud\n→ Enable Remote UI)
-NABU -up-> HA : tunnelled connection
-
-' User access — mobile via Tailscale
-MOBILE -up-> TS : Tailscale VPN tunnel\n(install on phone +\nadd container to compose)
-TS -up-> NGINX : http://100.x.x.x:80\n(Pi Tailscale IP)
+USER -up-> NGINX : http://<pi-ip>:80
+TEAM -up-> BALENA : balena push / pin / ssh
+BALENA -down-> RPI : OTA releases, variables
 
 @enduml

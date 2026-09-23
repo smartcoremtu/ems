@@ -1,0 +1,12 @@
+# balena push uploads the project directory to the cloud builder and honours this file
+# (NOT .gitignore). Keep household data and local tooling off the build servers.
+data/
+analysis/
+docs/
+.git/
+**/.venv/
+**/__pycache__/
+*.pkl
+*.xlsx
+*.pdf
+*.pptx

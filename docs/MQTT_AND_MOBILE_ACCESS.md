@@ -6,6 +6,15 @@
 1. How the MQTT broker works — both in the current architecture and in the Zigbee2MQTT alternative architecture
 2. Every mobile access solution available for the HA companion app, with implementation examples
 
+> **Status (September 2026): everything from Section 4 onwards is a design option, not something
+> that is deployed.** The fleet runs ZHA (two sites), the Solarman integration (one site) and the
+> Sigenergy integration (one site); the Mosquitto broker is idle and **no site has an MQTT
+> integration configured in Home Assistant**. There is no Zigbee2MQTT, Tailscale or Cloudflare
+> container in `docker-compose.yml`; remote access for the team is balenaCloud only, and
+> homeowners reach the dashboard on their home LAN. The current system is described in
+> [`COMPONENTS.md`](COMPONENTS.md). The Zigbee device in the examples below is the frient
+> Electricity Meter Interface **EMIZB‑141** (earlier drafts said "SMSZB‑120", which is a smoke alarm).
+
 ---
 
 ## Table of Contents
@@ -150,10 +159,9 @@ persistence_location /mosquitto/data/
 Opens a TCP socket bound to all network interfaces on port 1883. Inside the Docker bridge network this is reachable at `172.18.4.7:1883`. The `docker-compose.yml` exposes this to the Pi's host network via `ports: - "1883:1883"`, making it reachable from anything on the home LAN at `<pi-ip>:1883`.
 
 **`allow_anonymous true`**
-Any TCP client can connect without a username or password. The broker accepts all connections. This is currently acceptable because:
-- The primary clients (Zigbee2MQTT, Home Assistant) are on the private Docker bridge network `172.18.4.0/24`
-- WiFi devices on the repeater subnet can reach it via the iptables rule set by system-manager, but this is a controlled local network
-- The broker is not exposed to the internet
+Any TCP client can connect without a username or password. The broker accepts all connections. This is tolerable today only because:
+- Nothing publishes or subscribes: no MQTT device and no HA MQTT integration exist on any site
+- Port 1883 is published on the Pi, so it is reachable from the home LAN — but not from the internet
 
 This is a **known security gap** — see [Section 2.3](#23-security-considerations).
 
@@ -233,22 +241,27 @@ environment:
 
 ## 3. Current Architecture — Broker is Idle
 
-In the current deployment, the Zigbee data path **does not use MQTT at all**:
+In the current deployment none of the data paths uses MQTT. At the two Zigbee sites:
 
 ```
-Frient SMSZB-120 (Zigbee radio)
+frient EMIZB-141 (Zigbee meter interface on the smart meter LED)
   → Sonoff ZBDongle-E (USB serial / EZSP)
     → ZHA Integration (runs inside HA Python process)
-      → HA State Machine (sensor.frient_power, sensor.frient_energy)
+      → HA State Machine (sensor.* entities)
         → HA Event Bus (state_changed event)
           → InfluxDB Integration
             → InfluxDB (HTTP POST /api/v2/write)
 ```
 
-The Mosquitto broker is running but has **no active Zigbee publisher**. The broker starts, opens port 1883, and waits. The HA MQTT Integration is connected to it and subscribed, but no messages arrive because no device is publishing. The broker is infrastructure held in reserve for:
+At the inverter sites the first three steps are replaced by the `solarman` or `sigenergy`
+integration polling the inverter over Modbus/TCP on the home LAN.
+
+The Mosquitto broker is running with **no publisher and no subscriber**: Home Assistant has no
+MQTT integration configured on any device. The broker starts, opens port 1883, and waits. It is
+infrastructure held in reserve for:
 
 - Future WiFi-based devices (ESP32 sensors, Shelly relays) that speak native MQTT
-- The eesmart-d2l service integration (the TCP stream proxy exists but the container is not yet defined)
+- The eesmart-d2l service (the nginx TCP stream proxy exists but the container was never defined)
 - The alternative Zigbee2MQTT architecture described in Section 4
 
 ---
@@ -322,7 +335,7 @@ volumes:
 
 **4. Remove ZHA integration from HA:**
 In the HA web UI: Settings → Devices & Services → Zigbee Home Automation → Delete.
-The MQTT Integration (already configured at `172.18.4.7:1883`) becomes the primary sensor source.
+Add the MQTT Integration in the HA UI (Settings → Devices & Services → Add → MQTT, broker `172.18.4.7`, port 1883) — it does not exist on any device today — and it becomes the primary sensor source.
 
 ---
 
@@ -349,7 +362,7 @@ The Z2M configuration is stored in `/app/data/configuration.yaml` inside the con
 
 ### 4.4 MQTT Topic Structure
 
-All topics published by Zigbee2MQTT for the Frient SMSZB-120:
+All topics published by Zigbee2MQTT for the frient EMIZB-141 (illustrative — the friendly name and fields are what Z2M would generate):
 
 **Live sensor data** — published every ~10 seconds (configurable):
 
@@ -385,7 +398,7 @@ Payload: [
     "ieee_address": "0x0015bc003f000001",
     "friendly_name": "frient_blink_counter",
     "type": "EndDevice",
-    "model": "SMSZB-120",
+    "model": "EMIZB-141",
     "manufacturer": "Frient",
     "supported": true
   }
@@ -446,7 +459,7 @@ Topic: homeassistant/sensor/frient_blink_counter/power/config
   "device": {
     "identifiers": ["zigbee2mqtt_0x0015bc003f000001"],
     "name": "Frient Blink Counter",
-    "model": "SMSZB-120",
+    "model": "EMIZB-141",
     "manufacturer": "Frient",
     "sw_version": "20230413"
   }
@@ -470,7 +483,7 @@ Topic: homeassistant/sensor/frient_blink_counter/energy/config
   "device": {
     "identifiers": ["zigbee2mqtt_0x0015bc003f000001"],
     "name": "Frient Blink Counter",
-    "model": "SMSZB-120",
+    "model": "EMIZB-141",
     "manufacturer": "Frient"
   }
 }
@@ -526,7 +539,7 @@ Smart Meter S0 LED pulses at rate proportional to power draw
 │
 │  [S0 pulse wire, physical connection]
 ▼
-Frient SMSZB-120 (SMSZB-120)
+frient EMIZB-141 (Electricity Meter Interface)
 │  Counts pulses
 │  Calculates: power = 3,600,000 / (pulse_interval_ms × 1000) W
 │              energy = pulse_count / 1000 kWh
@@ -602,7 +615,7 @@ Consider what happens when HA restarts (common after OTA updates):
 **Without retention (hypothetical):**
 ```
 09:00:00  Z2M publishes power=342W (no retain)
-09:01:00  HA restarts (system-manager watchdog trigger)
+09:01:00  HA restarts (system-manager restarts HA after a release update)
 09:01:05  HA MQTT Integration reconnects, subscribes
 09:01:05  → No message delivered (last message was at 09:00:00, not retained)
 09:01:10  Z2M publishes next reading: power=338W
@@ -1055,5 +1068,5 @@ HA's `trusted_proxies` config in `configuration.yaml` must include all proxy sou
 
 ---
 
-*Document generated from full session analysis — 2026-02-24.*
+*Written 2026-02-24; status banner and factual corrections (device model, MQTT integration not configured, current sites) 2026-09-22.*
 *Maintained by the SmartCORE Ireland team, Munster Technological University.*

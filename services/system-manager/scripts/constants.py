@@ -10,3 +10,8 @@ APPLICATION_URL = SUPERVISOR_ADDRESS + "/v2/applications/state?apikey=" + API_KE
 STOP_URL = SUPERVISOR_ADDRESS + "/v2/applications/" + APP_ID + "/stop-service?apikey=" + API_KEY
 RESTART_URL = SUPERVISOR_ADDRESS + "/v2/applications/" + APP_ID + "/restart-service?apikey=" + API_KEY
 REBOOT_URL = SUPERVISOR_ADDRESS + "/v1/reboot?apikey=" + API_KEY
+
+# The captive-portal service the watchdog closes after boot, and for how long it may stay up.
+# PORTAL_MAX_MINUTES=0 leaves it running.
+WIFI_SERVICE = os.getenv("WIFI_PORTAL_SERVICE", "wifi-connect")
+PORTAL_MAX_MINUTES = int(os.getenv("PORTAL_MAX_MINUTES", "10"))

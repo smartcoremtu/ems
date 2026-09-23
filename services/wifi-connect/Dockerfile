@@ -1,7 +1,12 @@
-FROM debian:bullseye
+# bookworm: bullseye left LTS on 2026-08-31 and is no longer served by deb.debian.org, so
+# apt-get update fails on it.
+FROM debian:bookworm
 
-RUN apt-get update && apt-get install -y --no-install-recommends dnsmasq wireless-tools
-RUN apt-get -y install curl
+# iproute2: default-route check in start.sh. network-manager: nmcli only (talks to the host's
+# NetworkManager over D-Bus) to remove a leftover access-point profile.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends dnsmasq wireless-tools iproute2 network-manager curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 # use latest version. If specific version is required, it should be provided as vX.Y.Z, e.g v4.11.37
 ARG VERSION="v4.11.84"
