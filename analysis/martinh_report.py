@@ -89,7 +89,7 @@ class Book:
         return row + 1, row + len(df)
 
     def chart(self, ws, cell, kind, title, series, *, size=(720, 340), y_title=None, subtype=None,
-              x_interval=None, legend=True, y_fmt=None, reverse=False, x_num_fmt=None, y_max=None):
+              x_interval=None, legend=True, y_fmt=None, reverse=False, x_num_fmt=None, y_max=None, cat_label_low=False):
         """series: dicts with name, cat (sheet,r0,c0,r1,c1), val (same), color, optional points/width."""
         opts = {"type": kind}
         if subtype:
@@ -136,6 +136,8 @@ class Book:
             cat_axis["num_format"] = x_num_fmt
         if reverse:
             cat_axis["reverse"] = True
+        if cat_label_low:                       # keep category labels clear of negative bars
+            cat_axis["label_position"] = "low"
         if kind == "bar":
             ch.set_x_axis(value_axis)
             ch.set_y_axis(cat_axis)
