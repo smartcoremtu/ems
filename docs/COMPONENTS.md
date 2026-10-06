@@ -2,122 +2,107 @@
 
 **Project:** SmartCORE Ireland — Home Energy Management System
 **Organisation:** Munster Technological University (MTU)
-**Platform:** Raspberry Pi 5 · BalenaOS · Docker Compose
+**Platform:** Raspberry Pi 5 · balenaOS · docker-compose (8 services) · balenaCloud fleet `smartcoremtu/smartcore`
 
-This document is a complete technical reference for every component in the HEMS. It covers what each component is, what it does, how it connects to everything else, and concrete examples drawn from the actual codebase. It also records corrections to the current architecture diagram.
+A technical reference for every component on the box: what it is, what it does, how it connects
+to the rest, and — because a lot of the system is configured on the device rather than in git —
+what you will find on a deployed unit that is *not* in this repository. Where this document and
+the code disagree, trust the code; where the code and a device disagree, the device audit notes
+say so.
 
----
-
-## Diagram Corrections
-
-Before the component reference, the following items in the current architecture diagram are incorrect or missing and should be updated.
-
-| Issue | Detail |
-|---|---|
-| **4th physical layer box (Smart Zigbee Plug / Kettle)** | This hardware does not exist in this deployment. The only physical devices are the Smart Meter, the Frient SMSZB-120, and the Zigbee USB Dongle. Remove this box and its connections. |
-| **MQTT Broker missing** | Mosquitto (`172.18.4.7:1883`) is a running service on the bridge network but is not shown as its own component. It should be added to the bridge network section. |
-| **hass-configurator missing** | The hass-configurator (`172.18.4.6:3218`) is a running service on the bridge network but is not shown. It should be added to the bridge network section. |
+Companion documents: [`../DEPLOYMENT.md`](../DEPLOYMENT.md) (build, test, roll out),
+[`MQTT_AND_MOBILE_ACCESS.md`](MQTT_AND_MOBILE_ACCESS.md) (MQTT concepts, the Zigbee2MQTT
+alternative, and remote-access options — none of which is deployed), and the diagram
+[`architecture.png`](architecture.png) / [`architecture_diagram.puml`](architecture_diagram.puml).
 
 ---
 
 ## Table of Contents
 
 1. [System Overview](#1-system-overview)
-2. [Physical Layer](#2-physical-layer)
-   - [Grid Smart Meter](#21-grid-smart-meter)
-   - [Frient SMSZB-120 (Zigbee Blink Counter)](#22-frient-smszb-120-zigbee-blink-counter)
-   - [Zigbee USB Dongle](#23-zigbee-usb-dongle)
+2. [Physical Layer — What the Box Measures](#2-physical-layer--what-the-box-measures)
 3. [Docker Infrastructure — The HEMS Bridge Network](#3-docker-infrastructure--the-hems-bridge-network)
 4. [Bridge Network Services](#4-bridge-network-services)
-   - [Home Assistant](#41-home-assistant--17218428123)
-   - [InfluxDB](#42-influxdb--172184386)
-   - [MQTT Broker (Mosquitto)](#43-mqtt-broker-mosquitto--1721847-1883)
-   - [Nginx Reverse Proxy](#44-nginx-reverse-proxy--17218448-80)
-   - [hass-configurator](#45-hass-configurator--172184631)
-   - [led-status](#46-led-status--172184992)
+   - [4.1 Home Assistant](#41-home-assistant--17218428123)
+   - [4.2 InfluxDB](#42-influxdb--17218438086)
+   - [4.3 MQTT Broker (Mosquitto)](#43-mqtt-broker-mosquitto--17218471883)
+   - [4.4 Nginx Reverse Proxy](#44-nginx-reverse-proxy--172184480)
+   - [4.5 hass-configurator](#45-hass-configurator--17218463218)
+   - [4.6 led-status](#46-led-status--1721849)
 5. [Host Network Services](#5-host-network-services)
-   - [system-manager](#51-system-manager)
-   - [wifi-connect](#52-wifi-connect)
-6. [Balena Cloud](#6-balena-cloud)
-7. [Remote Access — Mobile Application](#7-remote-access--mobile-application)
+   - [5.1 system-manager](#51-system-manager)
+   - [5.2 wifi-connect](#52-wifi-connect)
+6. [balenaCloud](#6-balenacloud)
+7. [What Lives on the Device but Not in Git](#7-what-lives-on-the-device-but-not-in-git)
+8. [Known Issues](#8-known-issues)
 
 ---
 
 ## 1. System Overview
 
-The HEMS is a containerised energy monitoring gateway. Its job is to:
+The HEMS is a containerised energy-monitoring gateway. It:
 
-1. **Collect** energy measurements from a physical smart meter via a Zigbee radio sensor
-2. **Store** those measurements as time-series data in a local database
-3. **Present** that data through a single web interface accessible from a browser or mobile app
-4. **Self-heal** by automatically restarting services, deploying updates, and rebooting on failure
-5. **Indicate** system health visually via physical LEDs on the Pi
+1. **Collects** energy measurements from whatever the site has — a solar inverter, a battery
+   system, or the ESB smart meter's pulse LED — through Home Assistant integrations
+2. **Stores** them as time series in a local InfluxDB (nothing leaves the house unless an
+   integration is configured to send it)
+3. **Presents** them through one web entry point (nginx on port 80) and the Home Assistant app
+4. **Self-heals**: restarts Home Assistant after an update, reboots after 30 minutes without
+   internet, and is updated over the air by balenaCloud
+5. **Indicates** health with three LEDs on the Pi's GPIO header
 
-All logic runs in eight Docker containers orchestrated by `docker-compose.yml` on a Raspberry Pi 5 running BalenaOS. Balena Cloud provides the remote deployment and management plane.
-
----
-
-## 2. Physical Layer
-
-### 2.1 Grid Smart Meter
-
-The grid smart meter is the utility-installed electricity meter in the home. It is a passive physical device — it has no network interface and no software. It measures the home's total electricity consumption and records it.
-
-The only interface available for real-time monitoring is the **S0 pulse LED output**: a small red LED on the meter front panel that blinks at a fixed rate proportional to power consumption. The standard Irish/EU pulse constant is **1000 pulses per kWh**, meaning:
-
-```
-Instantaneous power (W) = 3,600,000 / (time between pulses in ms × 1000)
-Accumulated energy (kWh) = total pulse count / 1000
-```
-
-The meter itself does not connect to the Pi. It connects to the Frient sensor described below.
+Eight containers run under `docker-compose.yml` on a Raspberry Pi 5 with balenaOS. balenaCloud is
+the deployment and remote-management plane.
 
 ---
 
-### 2.2 Frient SMSZB-120 (Zigbee Blink Counter)
+## 2. Physical Layer — What the Box Measures
 
-The Frient Electricity Meter Interface (product code SMSZB-120) is the device that reads the smart meter and brings its data into the digital system.
+The box is **equipment-agnostic**: the sensing hardware differs per site and is set up through the
+Home Assistant UI, not in this repository. Three arrangements are deployed (September 2026):
 
-**What it is:** A Zigbee radio sensor with a physical S0 pulse input terminal. It clamps directly onto the smart meter's S0 output wires. When the meter LED blinks, the Frient counts the pulse.
+### 2.1 Solar inverter via a Solarman logger
 
-**What it is not:** It is not a WiFi device. It does not speak MQTT. It does not connect to a broker. It is a Zigbee sensor — it communicates exclusively via the IEEE 802.15.4 radio protocol to the Zigbee USB Dongle described below.
+A Sofar G3 inverter with a Solarman (LSW) Wi‑Fi data logger on the home LAN. Home Assistant polls
+it over Modbus/TCP with the **`solarman`** custom component (installed through HACS). It exposes
+~36 entities: grid / load / inverter / PV power, string voltages and currents, grid voltage and
+frequency, daily and lifetime energy counters, inverter temperatures, state and fault text. This
+is the richest data source in the fleet and the one the energy report on the analysis branch was
+built from. Battery power and state of charge are *not* exposed by this integration on the
+current firmware; the analysis estimates them.
 
-**What it reports:** The Frient implements the Zigbee Smart Energy profile. It exposes two key Zigbee cluster attributes:
-- **Cluster 0x0702, Attribute 0x0000** — Current Summation (accumulated energy in kWh)
-- **Cluster 0x0702, Attribute 0x0400** — Instantaneous Demand (current power in W)
+### 2.2 Sigenergy inverter and battery
 
-These are decoded by the ZHA integration inside Home Assistant and become `sensor.*` entities automatically.
+A Sigenergy hybrid inverter with battery, read over Modbus/TCP by the **`sigenergy`** custom
+component. Provides PV, battery, grid and load figures directly from the system.
 
-**Connection chain:**
+### 2.3 ESB smart meter pulse LED via Zigbee
+
+The utility smart meter has no data interface for the homeowner, but its front-panel LED blinks
+once per Wh (1000 pulses = 1 kWh). A **frient Electricity Meter Interface, model EMIZB‑141**, is
+stuck over that LED, counts the pulses, and reports instantaneous demand and cumulative
+consumption over Zigbee (Smart Energy cluster 0x0702). A USB Zigbee coordinator on the Pi —
+**Sonoff ZBDongle‑E** (Silicon Labs EFR32MG21, EZSP serial protocol) — receives the frames, and
+the **ZHA** integration inside Home Assistant decodes them into `sensor.*` entities.
+
 ```
-Smart Meter S0 LED → pulse wire → Frient SMSZB-120 → IEEE 802.15.4 radio → Zigbee USB Dongle
+Smart meter LED → frient EMIZB-141 → IEEE 802.15.4 → ZBDongle-E (/dev/ttyUSB0) → ZHA in Home Assistant
 ```
 
----
+The Home Assistant container runs `privileged: true` so the USB serial device is visible inside
+it. Import only: this arrangement cannot see export, solar or battery, and the ESB meter's own
+half-hourly data (downloadable from the ESB Networks portal) remains the billing reference.
 
-### 2.3 Zigbee USB Dongle
-
-**Hardware:** Sonoff ZBDongle-E, based on the Silicon Labs EFR32MG21 chip.
-
-**What it is:** A USB radio coordinator. It is the hardware bridge between the Zigbee radio network (where the Frient lives) and the Raspberry Pi. It is plugged into a USB port on the Pi.
-
-**What it speaks:**
-- **Over the air:** IEEE 802.15.4 radio frames to/from Zigbee devices
-- **Over USB to the Pi:** EZSP — EmberZNet Serial Protocol — a binary serial protocol that lets software on the Pi tell the chip what to do (scan, join, transmit, receive)
-
-The dongle has no IP address, no MQTT client, no web server. It is purely a radio controlled over a serial port. All intelligence about what to do with the Zigbee frames lives in the ZHA integration inside Home Assistant.
-
-In `docker-compose.yml`, the Home Assistant container is given `privileged: true`, which allows Docker to pass the USB device through to the container so ZHA can open the serial port directly.
+> Earlier versions of this document and the June 2026 partner presentation call the Zigbee device a
+> "Frient SMSZB‑120". That is frient's smoke alarm; the meter interface is the EMIZB‑141.
 
 ---
 
 ## 3. Docker Infrastructure — The HEMS Bridge Network
 
-### What it is
+Docker creates a virtual switch inside the Pi's kernel. Containers that join it get fixed IPs and
+can talk to each other; nothing outside the Pi can reach a container unless a port is published.
 
-When Docker starts, it creates a **virtual network switch** entirely inside the Linux kernel of the Raspberry Pi. No physical hardware is involved. Every container that joins this switch gets its own virtual network interface with a fixed IP address. Containers on the same switch can talk to each other by IP. The outside world — any device outside the Pi — **cannot reach a container unless a port is explicitly published** in `docker-compose.yml`.
-
-From `docker-compose.yml`:
 ```yaml
 networks:
   hems:
@@ -128,55 +113,34 @@ networks:
           gateway: 172.18.4.1
 ```
 
-### The IP address table
-
-Every service on the bridge has a fixed, static IP:
-
 | Address | Service |
 |---|---|
-| `172.18.4.1` | Gateway (the virtual switch itself) |
-| `172.18.4.2` | Home Assistant |
-| `172.18.4.3` | InfluxDB |
-| `172.18.4.4` | Nginx reverse proxy |
+| `172.18.4.1` | gateway (the bridge itself) |
+| `172.18.4.2` | homeassistant |
+| `172.18.4.3` | influxdb |
+| `172.18.4.4` | nginx-reverse-proxy |
 | `172.18.4.6` | hass-configurator |
-| `172.18.4.7` | MQTT Broker (Mosquitto) |
+| `172.18.4.7` | mqtt |
 | `172.18.4.9` | led-status |
 
-### Why static IPs are essential
+The addresses are static because they are hard-coded in three places: `configuration.yaml`
+(`influxdb: host: 172.18.4.3`), `led.py` (`HA_IP = "172.18.4.2"`) and nginx `http.conf`
+(`proxy_pass` targets).
 
-These addresses are hardcoded in three separate places across the codebase. If Docker assigned them dynamically they would change on restart and silently break everything.
-
-**In `configuration.yaml`** — HA writing to InfluxDB:
-```yaml
-influxdb:
-  host: 172.18.4.3   # would break if InfluxDB got a different IP
-```
-
-**In `led.py`** — led-status pinging HA:
-```python
-HA_IP = "172.18.4.2"  # would ping the wrong container if HA moved
-```
-
-**In `http.conf`** — Nginx routing to HA and InfluxDB:
-```nginx
-set $ha http://172.18.4.2:8123;
-proxy_pass http://172.18.4.3:8086;
-```
-
-### What is visible from outside the Pi
-
-A port mapping (`ports:`) in docker-compose cuts a hole from the Pi's real network interface into a specific container. Everything without a mapping is completely invisible from outside:
+**Published on the Pi's real network interface:**
 
 ```
-Pi's real network (e.g. 192.168.1.50)
-  :80   ─────► nginx         172.18.4.4:80    (primary UI entry point)
-  :8123 ─────► homeassistant 172.18.4.2:8123  (direct HA access)
-  :8086 ─────► influxdb      172.18.4.3:8086  (direct InfluxDB access)
-  :1883 ─────► mqtt          172.18.4.7:1883  (external MQTT clients)
-  :3218 ─────► configurator  172.18.4.6:3218  (direct configurator)
+:80    → nginx-reverse-proxy   primary entry point (HA, /influx/, /configurator/)
+:8123  → homeassistant         direct HA access (bypasses nginx)
+:6053  → homeassistant         ESPHome native API port (published, unused)
+:8086  → influxdb              direct InfluxDB API/UI
+:1883  → mqtt                  MQTT broker (idle)
+:7845  → nginx stream proxy    to a container that does not exist (see Known Issues)
 
-  led-status (172.18.4.9) — NO port mapping, invisible from outside
+not published: hass-configurator (:3218), led-status
 ```
+
+`system-manager` and `wifi-connect` use `network_mode: host` and have no bridge address.
 
 ---
 
@@ -184,78 +148,37 @@ Pi's real network (e.g. 192.168.1.50)
 
 ### 4.1 Home Assistant — `172.18.4.2:8123`
 
-**Image:** `homeassistant/home-assistant:2025.3`
-**Volume:** `hass-config` mounted at `/config`
-**Role:** The central hub. It owns the Zigbee hardware, creates all sensor entities, writes all data to InfluxDB, and serves the primary user interface.
+**Image:** `ghcr.io/home-assistant/home-assistant:2026.6.3` (`services/homeassistant/docker/Dockerfile`)
+**Volume:** `hass-config` → `/config`
+**Role:** owns the site's equipment through its integrations, holds every entity's state, writes
+every `sensor` change to InfluxDB, serves the UI.
 
-Home Assistant is not a simple web server. It is a Python application that runs an ecosystem of integrations simultaneously inside one process. Four are critical in this system.
+The image build copies `services/homeassistant/config/` to `/config`, but on any device that has
+booted once the `hass-config` **volume shadows that directory**. Repo changes to
+`configuration.yaml` therefore never reach an existing device; the copy in git is the *initial*
+config for a fresh box. The device audit of September 2026 found the on-device
+`configuration.yaml`, `automations.yaml` and `purge_backups.sh` still byte-identical to git, so
+the two have not drifted yet.
 
----
+#### Integrations that produce data
 
-#### ZHA Integration (Zigbee Home Automation)
+Configured through the HA UI, stored in `/config/.storage/core.config_entries` inside the volume:
 
-ZHA is a library that runs **inside the HA process**. It owns the USB dongle directly via the USB passthrough granted by `privileged: true` in the compose file.
+| Integration | Kind | Where |
+|---|---|---|
+| `solarman` | HACS custom component, Modbus/TCP to a Solarman logger | inverter site |
+| `sigenergy` | custom component, Modbus/TCP | Sigenergy site |
+| `zha` | built-in; owns the USB coordinator; frient EMIZB‑141 paired | two meter-LED sites |
+| `energyid` | custom; pushes readings to `hooks.energyid.eu` (the only integration that sends data off-site — check it against the ethics application) | inverter site |
+| `hacs` | custom-component store, installed on the device | most sites |
 
-When the Frient blink counter sends a Zigbee radio frame, the sequence is:
+There is **no MQTT integration configured on any site** (see 4.3). ZHA and Solarman do not use
+MQTT.
 
-```
-Frient SMSZB-120
-  │  IEEE 802.15.4 radio frame
-  ▼
-Zigbee USB Dongle
-  │  EZSP binary serial over USB
-  ▼
-ZHA (running inside Home Assistant Python process)
-  │  decodes EZSP → parses Zigbee cluster 0x0702
-  │  extracts: power = 342 W, energy = 1053.2 kWh
-  ▼
-HA State Machine
-  │  sensor.frient_power  = 342 W
-  │  sensor.frient_energy = 1053.2 kWh
-```
+#### The data path inside Home Assistant
 
-**MQTT is not involved in this path at all.** ZHA speaks directly to the hardware.
-
----
-
-#### HA State Machine
-
-The State Machine is the central registry of the system. Every device, sensor, switch, and entity in the system has a current state stored here. State entries have:
-- A unique `entity_id` (e.g. `sensor.frient_power`)
-- A `state` value (e.g. `342`)
-- A unit of measurement (e.g. `W`)
-- A set of attributes (device class, last changed, etc.)
-
-When ZHA updates a sensor value, it writes the new value here. When the InfluxDB integration wants to know what changed, it listens here.
-
----
-
-#### HA Internal Event Bus
-
-The Event Bus is a publish/subscribe message system running entirely inside the HA Python process. When any entity's state changes, the State Machine fires a `state_changed` event onto the event bus containing the old state, the new state, and the entity ID.
-
-**This is the pivot point of the entire data pipeline.** Every integration — InfluxDB, MQTT, automations, dashboards — reacts to events on this bus. They do not talk to each other directly; they all talk to the bus.
-
-```
-ZHA updates sensor.frient_power = 342
-  │
-  ▼
-Event Bus fires: state_changed {
-  entity_id: "sensor.frient_power",
-  new_state: { state: "342", attributes: {unit: "W"} },
-  old_state: { state: "338" }
-}
-  │
-  ├──► InfluxDB Integration receives it → writes to database
-  ├──► HA Dashboard receives it → updates live UI
-  └──► Any automation triggers receive it → run if conditions match
-```
-
----
-
-#### InfluxDB Integration
-
-Configured entirely in `configuration.yaml`:
+Every integration updates entities in the **state machine**; each change fires a `state_changed`
+event on the internal **event bus**; the **InfluxDB integration** listens and writes:
 
 ```yaml
 influxdb:
@@ -271,75 +194,67 @@ influxdb:
       - sensor
 ```
 
-This integration subscribes to the Event Bus and listens for `state_changed` events. When one arrives, it checks whether the entity's domain is `sensor`. If it matches, it formats the state as InfluxDB **line protocol** and sends it immediately via HTTP POST:
+Only the `sensor` domain is written. HA only writes when a value **changes**, so a flat signal
+produces no points — a long run without points is normally "unchanged", not "no data". Points
+are posted immediately as line protocol:
 
-```http
+```
 POST http://172.18.4.3:8086/api/v2/write?org=hems&bucket=home_assistant
 Authorization: Token <INFLUX_TOKEN>
-Content-Type: text/plain
 
-sensor,entity_id=frient_power,unit_of_measurement=W value=342.0 1708789012000000000
+W,domain=sensor,entity_id=inverter_grid_power,friendly_name=... value=1020 1790089562559901000
 ```
 
-The token is never stored in the codebase — it is injected as a Balena environment variable (`INFLUX_TOKEN`) at runtime via `!env_var INFLUX_TOKEN`.
+Note the **measurement is the unit** (`W`, `kWh`, `V`, `Hz`, `°C`), which is Home Assistant's
+default for the InfluxDB integration; the entity is the `entity_id` tag. Text states (inverter
+state, fault text) are stored under a `state` field instead of `value`.
 
-**Important:** The `include: domains: [sensor]` filter means only entities in the `sensor` domain are written. `binary_sensor`, `switch`, `light`, `automation`, and all other domains are ignored. This keeps the database focused on measurement data.
+#### Other configuration in git
 
----
-
-#### MQTT Integration
-
-Configured via the HA web UI (not in `configuration.yaml`). The broker address `172.18.4.7:1883` is stored at runtime in `/config/.storage/core.config_entries` inside the `hass-config` volume — this file is not committed to git.
-
-The MQTT integration is **not in the Zigbee data path**. The Frient sensor goes entirely through ZHA. The MQTT broker is present as infrastructure for any future device that speaks native MQTT (WiFi-based sensors, relays, the eesmart-d2l service). Any such device publishes a value to a MQTT topic; HA subscribes to that topic via MQTT Discovery or manual config; a `sensor.*` entity is created; it fires `state_changed` on the Event Bus; InfluxDB writes it. Once the entity exists in the State Machine, the path to InfluxDB is identical to the ZHA path.
+- `http: use_x_forwarded_for` with `trusted_proxies: 172.0.0.0/8, 127.0.0.1` so nginx can front HA.
+- `automations.yaml`: a backup on the 1st of each month at 01:12, and `purge_backups.sh` nightly
+  at 02:12, which deletes backups older than 90 days. Verified on a device: three monthly backups present.
+- `configuration.yaml` also includes `template_sensors/`, `automations/` and `themes/`
+  directories that exist **neither in git nor on the devices**. Home Assistant starts regardless.
+  They are placeholders for per-site template sensors that were never used.
 
 ---
 
 ### 4.2 InfluxDB — `172.18.4.3:8086`
 
-**Image:** `influxdb:2.7.1`
-**Volume:** `influxdb-data` mounted at `/var/lib/influxdb2`
-**Role:** Time-series database. The permanent store of all energy measurements.
+**Image:** `influxdb:2.7.1` · **Volume:** `influxdb-data` → `/var/lib/influxdb2`
 
-InfluxDB 2.x organises data in a hierarchy:
+Organisation `hems`, bucket `home_assistant`, created by hand on first setup through the UI
+(`http://<ip>/influx/`); there are no init scripts. The token created there is what
+`INFLUX_TOKEN` must contain.
+
+Data layout, as written by Home Assistant:
 
 ```
-Organisation: hems
-  └── Bucket: home_assistant
-        └── Measurements (e.g. "sensor")
-              └── Series (tagged by entity_id, unit, etc.)
-                    └── Points (timestamp + value)
+bucket home_assistant
+  measurement = unit  (W, kWh, V, A, Hz, °C, %, ...)
+    tags   entity_id, domain, friendly_name, ...
+    fields value (numeric)   or   state (text)
 ```
 
-Every energy reading from the Frient lands here as a point. A point contains:
-- **Measurement:** always `sensor` (the HA domain name)
-- **Tags:** `entity_id`, `domain`, `friendly_name`, `unit_of_measurement` — indexed, used for filtering
-- **Field:** `value` — the numeric measurement
-- **Timestamp:** nanosecond precision Unix time
+Flux example — last hour of grid power at an inverter site:
 
-**Example stored point:**
-```
-sensor,entity_id=frient_power,domain=sensor,unit_of_measurement=W value=342.0 1708789012000000000
-```
-
-InfluxDB is queried using **Flux**, a functional query language. Example to get the last hour of power readings:
 ```flux
 from(bucket: "home_assistant")
   |> range(start: -1h)
-  |> filter(fn: (r) => r.entity_id == "frient_power")
+  |> filter(fn: (r) => r._measurement == "W" and r.entity_id == "inverter_grid_power" and r._field == "value")
 ```
 
-InfluxDB has no custom init scripts in this project. The organisation and bucket are created on first startup by InfluxDB itself using environment variables, or during initial setup through the web UI at `/influx/`.
+Volume: about 21 million points over five months at one inverter site (~5 s cadence on the power
+signals). Exporting: run `influx query --raw --file` inside the container, write to `/mnt/data`,
+then `balena device tunnel` + `scp` — see the project context notes. ~30 s per million points on
+a Pi 5.
 
 ---
 
 ### 4.3 MQTT Broker (Mosquitto) — `172.18.4.7:1883`
 
-**Image:** `eclipse-mosquitto`
-**Volume:** `mosquitto` mounted at `/mosquitto/data`
-**Role:** Message broker for non-Zigbee MQTT devices.
-
-Full configuration from `mosquitto.conf`:
+**Image:** `eclipse-mosquitto` · **Volume:** `mosquitto` → `/mosquitto/data`
 
 ```
 listener 1883
@@ -348,471 +263,219 @@ persistence true
 persistence_location /mosquitto/data/
 ```
 
-Mosquitto is a **post box with no intelligence**. It holds no application logic. Its only job is: if a client sends a message addressed to topic X, forward it to every client that has subscribed to topic X.
+**Status: idle on every deployed site.** No site has an MQTT device and Home Assistant has no
+MQTT integration configured, so nothing publishes or subscribes. The broker is kept for future
+devices (Wi‑Fi sensors, relays) or for the Zigbee2MQTT alternative architecture described in
+[`MQTT_AND_MOBILE_ACCESS.md`](MQTT_AND_MOBILE_ACCESS.md).
 
-**`allow_anonymous true`** means any device that can reach port 1883 can publish or subscribe without a username and password. This is acceptable because the broker is on the private Docker bridge network — only containers on the bridge and WiFi devices permitted by the iptables rule in system-manager can reach it. This is a known security gap and should be hardened with credentials before production deployment.
-
-**`persistence true`** means the broker writes its state (subscriptions and retained messages) to `/mosquitto/data/`. If the container restarts, the last retained value for every topic is replayed to new subscribers immediately, so HA does not have to wait for the next measurement to arrive before showing a value.
-
-**Current status in this deployment:** The Frient blink counter is a Zigbee device and does not use MQTT. The broker is running but has no confirmed active Zigbee publisher. It is ready for future WiFi-based devices or the eesmart-d2l integration.
-
-**In the Zigbee2MQTT alternative architecture**, the broker becomes the active data bus: the `zigbee2mqtt` container (172.18.4.5) owns the USB dongle and publishes all Zigbee sensor data to `zigbee2mqtt/<device>` topics. The HA MQTT Integration subscribes and auto-creates entities via MQTT Discovery payloads published to `homeassistant/sensor/<device>/<field>/config`. See [`MQTT_AND_MOBILE_ACCESS.md`](MQTT_AND_MOBILE_ACCESS.md) for full topic structure, payload examples, and end-to-end flow.
+`allow_anonymous true` on a port that is published to the LAN (`1883:1883`) is a known gap.
+Harmless while idle; add a password file before any MQTT device is introduced.
 
 ---
 
 ### 4.4 Nginx Reverse Proxy — `172.18.4.4:80`
 
-**Image:** `arm64v8/nginx`
-**Role:** Single external entry point. Routes all browser and app traffic to the correct backend service.
+**Image:** `arm64v8/nginx:latest` + `apache2-utils` · **Published:** `80:80`
 
-Without Nginx, accessing the system requires remembering three different ports:
-- `:8123` for Home Assistant
-- `:8086` for InfluxDB
-- `:3218` for hass-configurator
+Single entry point so that users need one URL, and the only way to reach the configurator.
 
-With Nginx everything is on port 80 and the URL path decides the destination.
+**`start.sh`** — builds the basic-auth file from the service variables, then starts nginx:
 
-#### Startup — `start.sh`
-
-```bash
-htpasswd -cb /etc/nginx/.passwd $CONFIG_USER $CONFIG_PASSWORD
+```sh
+if [ -n "$CONFIG_USER" ] && [ -n "$CONFIG_PASSWORD" ]; then
+    htpasswd -cb /etc/nginx/.passwd "$CONFIG_USER" "$CONFIG_PASSWORD"
+else
+    echo "WARNING: CONFIG_USER / CONFIG_PASSWORD are not set - /configurator/ will be refused until they are."
+    rm -f /etc/nginx/.passwd
+fi
 nginx
 sleep infinity
 ```
 
-The first line generates a basic auth credentials file from two Balena environment variables (`CONFIG_USER`, `CONFIG_PASSWORD`). This runs at container start so credentials always reflect the current environment variables. The `sleep infinity` keeps the container process alive.
+**`http.conf`** routes:
 
-#### HTTP Routing — `http.conf`
+| Path | Upstream | Notes |
+|---|---|---|
+| `/` | `172.18.4.2:8123` Home Assistant | WebSocket upgrade headers, `X-Forwarded-For`. `set $ha` variable so nginx starts even if HA is still booting. |
+| `/configurator/` | `172.18.4.6:3218` | **`auth_basic`** against `/etc/nginx/.passwd`; fails closed when the file is absent. `proxy_hide_header Authorization` so the login header does not reach the configurator. |
+| `/influx/` | `172.18.4.3:8086` | Strips the prefix and rewrites the InfluxDB single-page app's absolute paths with `sub_filter`, plus an injected `/influx/env.js` that sets the app's base path. Fragile but works on 2.7.1. |
 
-**Route 1 — Home Assistant (`/`)**
-
-```nginx
-location / {
-    set $ha http://172.18.4.2:8123;
-    proxy_pass $ha;
-    proxy_http_version 1.1;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection $connection_upgrade;
-}
-```
-
-Using `set $ha` as a variable rather than a literal IP in `proxy_pass` is deliberate: Nginx resolves the address at request time rather than startup. If HA is still booting when Nginx starts, a literal address would cause Nginx itself to fail. With a variable it defers resolution and starts cleanly.
-
-The `Upgrade` and `Connection` headers enable **WebSocket support**. The HA frontend keeps a permanent WebSocket connection open so the dashboard updates in real time when sensor values change. Without these headers Nginx would close the WebSocket handshake and the UI would be static.
-
-**`X-Forwarded-For`** passes the real client IP through to HA. HA trusts this because `configuration.yaml` declares:
-```yaml
-http:
-  use_x_forwarded_for: true
-  trusted_proxies:
-    - 172.0.0.0/8   # the entire Docker bridge range
-```
-
-**Route 2 — InfluxDB (`/influx/`)**
-
-InfluxDB's web interface is a webpack single-page application compiled with the assumption it lives at the root path `/`. Every asset reference, API call, and link inside the compiled HTML/CSS/JS uses paths like `/api/v2/query` and `src="/app.js"`. When served under `/influx/`, the browser requests `/influx/` but the HTML tells it to load `/app.js` — not `/influx/app.js` — and gets a 404.
-
-Nginx fixes this with `sub_filter` directives that **rewrite the HTML and JavaScript on the fly** before they reach the browser:
-
-```nginx
-rewrite ^/influx/(.*) /$1 break;   # strip /influx/ before passing upstream
-
-sub_filter '<base href="/">'  '<base href="/influx/">';
-sub_filter 'src="/'           'src="/influx/';
-sub_filter 'href="/'          'href="/influx/';
-sub_filter '/api/'            '/influx/api/';
-sub_filter 'api/v2/query'     'influx/api/v2/query';
-sub_filter_once off;
-
-proxy_pass http://172.18.4.3:8086;
-```
-
-It also injects a synthetic JavaScript file:
-
-```nginx
-location = /influx/env.js {
-    return 200 "var prefix='/influx/'; process = {'env' : {'BASE_PATH': prefix, 'API_BASE_PATH': prefix}};";
-}
-```
-
-This sets webpack's `process.env` at runtime so the compiled JS bundle knows its own base path. It is injected into every HTML page via:
-```nginx
-sub_filter '</head>' '<script src="/influx/env.js"></script></head>';
-```
-
-InfluxDB itself never knows it is being served from a subpath — it always thinks it is at `/`.
-
-**Route 3 — hass-configurator (`/configurator/`)**
-
-```nginx
-location /configurator/ {
-    set $configurator http://172.18.4.6:3218;
-    proxy_pass $configurator;
-    proxy_hide_header Authorization;
-}
-```
-
-`proxy_hide_header Authorization` strips the basic auth header before forwarding, preventing the configurator from misinterpreting credentials intended for Nginx.
-
-#### TCP Stream Proxy — `nginx.conf`
-
-```nginx
-stream {
-    server {
-        resolver 127.0.0.11 ipv6=off valid=10s;
-        listen 7845;
-        set $eesmart eesmart-d2l:7845;
-        proxy_pass $eesmart;
-        proxy_connect_timeout 1s;
-        proxy_timeout 5m;
-    }
-}
-```
-
-This is separate from the HTTP block. The `stream` module forwards raw TCP bytes — no HTTP parsing. Port 7845 is proxied verbatim to a service named `eesmart-d2l`. The `resolver 127.0.0.11` is Docker's internal DNS server, used to resolve the container name dynamically. **Note:** No container named `eesmart-d2l` is defined in `docker-compose.yml`. This proxy route is currently broken and requires either a new container definition or an external hostname to be configured.
+**`nginx.conf`** also has a `stream {}` block that proxies TCP `:7845` to `eesmart-d2l:7845`.
+No such container is defined, so this route is dead (see Known Issues).
 
 ---
 
 ### 4.5 hass-configurator — `172.18.4.6:3218`
 
-**Image:** `causticlab/hass-configurator-docker:latest`
-**Volume:** `hass-config` mounted at `/hass-config` (shared with Home Assistant)
-**Role:** In-field browser-based file editor for Home Assistant configuration.
+**Image:** `causticlab/hass-configurator-docker:latest` · **Volume:** `hass-config` → `/hass-config`
 
-#### The problem it solves
+A browser-based file editor for the Home Assistant config volume. HA add-ons (file editor, SSH)
+only exist on Home Assistant OS, not on a plain container install, so this is the way to edit
+`configuration.yaml`, automations and scripts on a deployed box without SSH or a rebuild. It
+mounts the **same volume** as HA, so a saved file is visible to HA at once; reload the relevant
+integration from Developer Tools.
 
-This system runs HA inside a plain Docker container on BalenaOS. This is fundamentally different from a Home Assistant OS (HAOS) installation. HA add-ons — including the built-in file editor and SSH terminal add-ons — **only work on HAOS/Supervised installs**. They are not available here.
-
-The HA configuration files (`configuration.yaml`, `automations.yaml`, `scripts.yaml`, etc.) are stored inside the `hass-config` Docker volume mounted at `/config` in the HA container. Without hass-configurator, editing these files on a deployed Pi requires either:
-- Running `balena ssh <device-uuid>` and editing with a terminal text editor
-- Editing the files locally and running `balena push` — which triggers a full Docker image rebuild and container restart
-
-Neither is workable for small on-site adjustments, particularly at remote pilot sites.
-
-#### How it works
-
-The configurator mounts the **same Docker volume** as Home Assistant:
-
-```yaml
-homeassistant:
-  volumes:
-    - 'hass-config:/config'      # HA sees files here
-
-hass-configurator:
-  volumes:
-    - 'hass-config:/hass-config' # Configurator sees same files here
-  environment:
-    - HC_BASEPATH=/hass-config
-```
-
-Because it is the same volume, a file saved in the configurator's web editor is immediately visible to the HA process. After saving `configuration.yaml` the relevant HA integration can be reloaded from the HA Developer Tools without a full container restart.
-
-#### The missing template_sensors directory
-
-`configuration.yaml` line 32 contains:
-```yaml
-template: !include_dir_merge_list template_sensors/
-```
-
-This directory **does not exist in the git repository**. It is intended to be created on the deployed device via hass-configurator once real Zigbee devices are paired and their entity IDs are known. A field engineer would:
-
-1. Pair the Frient via ZHA — HA creates `sensor.frient_smszb_120_instantaneous_demand`
-2. Open `http://<pi-ip>/configurator/`
-3. Create `template_sensors/energy.yaml` with a cleaner derived entity
-4. Reload the template platform in HA — new sensor appears immediately, no redeployment needed
-
-This is the primary intended workflow for device-specific configuration.
+The configurator has no login of its own (`HC_USERNAME`/`HC_PASSWORD` are unset). It is therefore
+**not published on the host** any more; the only route is `http://<ip>/configurator/` through
+nginx, which demands `CONFIG_USER`/`CONFIG_PASSWORD`.
 
 ---
 
 ### 4.6 led-status — `172.18.4.9`
 
-**Base image:** Ubuntu + `gpiozero` + `lgpio`
-**Devices:** `/dev/gpiochip0` (GPIO chip passthrough)
-**Volume:** `hass-config` (shared with HA, for log access)
-**Role:** Physical health indicators via three GPIO-controlled LEDs on the Pi.
+**Image:** Ubuntu + `gpiozero` + `lgpio` · **Device:** `/dev/gpiochip0` · **Volume:** `hass-config` (to read the HA log)
 
-`led-status` is on the **bridge network** (not the host network) at `172.18.4.9`. This is necessary because it pings Home Assistant at `172.18.4.2` — an address that only exists inside the bridge network.
+Three LEDs, driven from `led.py`:
 
-From `led.py`:
-```python
-error_led = LED(22)   # GPIO pin 22
-led1      = LED(17)   # GPIO pin 17
-led2      = LED(27)   # GPIO pin 27
+| GPIO | Meaning | Check |
+|---|---|---|
+| 17 | Home Assistant reachable | `ping -c1 -W1 172.18.4.2` |
+| 27 | Internet reachable | `ping -c1 -W1 8.8.8.8` |
+| 22 | Error | any new line in `/hass-config/home-assistant.log` containing `ERROR` since the last read |
 
-HA_IP     = "172.18.4.2"
-Google_IP = "8.8.8.8"
-LOG_FILE  = "/hass-config/home-assistant.log"
-```
+It sits on the bridge network (not host) because it pings HA's bridge address. `gpiozero`'s lgpio
+factory is monkey-patched to open GPIO chip 0, which is what the Pi 5 needs.
 
-Every two seconds, three independent checks run:
-
-**GPIO 17 — Home Assistant health:**
-```python
-if ping(HA_IP):
-    led1.on()
-else:
-    led1.off()
-```
-Sends a single ICMP ping to `172.18.4.2`. If HA responds, LED 17 is on. If HA is down, crashing, or restarting, the LED goes off immediately giving a physical indication.
-
-**GPIO 27 — Internet (WAN) health:**
-```python
-if ping(Google_IP):
-    led2.on()
-else:
-    led2.off()
-```
-Pings Google's DNS server at `8.8.8.8`. This tests whether the Pi has internet access. If the home router loses connectivity, this LED goes off independently of the HA LED.
-
-**GPIO 22 — Home Assistant error state:**
-```python
-size = os.path.getsize(LOG_FILE)
-if size > last_size:
-    with open(LOG_FILE, "r") as f:
-        f.seek(last_size)
-        for line in f:
-            if "ERROR" in line:
-                error_led.on()
-                break
-        else:
-            error_led.off()
-    last_size = size
-```
-Reads only the **new lines added since the last check** (via file seek to `last_size`). If any new line contains the word `ERROR`, the error LED turns on. It only turns off when new log lines arrive with no errors. This gives a persistent physical warning when HA reports a problem.
-
-The GPIO library requires a patch for Raspberry Pi 5 because Pi 5 uses a different GPIO chip number than Pi 4:
-```python
-def __patched_init(self, chip=None):
-    chip = 0   # forced to chip 0 for Pi 5
-    self._handle = lgpio.gpiochip_open(chip)
-```
+Bug: `time.sleep(2)` is placed **after** the `while True:` loop, not inside it, so the loop runs
+back-to-back (each iteration is throttled only by the two 1‑second ping timeouts). Harmless but
+wasteful; the intended cadence is every 2 seconds.
 
 ---
 
 ## 5. Host Network Services
 
-### What "host network" means
-
-The Docker bridge network (`172.18.4.0/24`) is isolated from the Pi's real operating system network stack. A container on the bridge cannot modify the Pi's kernel firewall rules, cannot create a WiFi access point, and cannot reach processes running directly on the Pi OS (like the Balena Supervisor) via `127.0.0.1`.
-
-`network_mode: host` removes all network isolation for a container. It shares the Pi's actual `wlan0`, `eth0`, routing table, iptables chains, and loopback interface. It is as if the process runs directly on the Pi. The trade-off is that these containers **cannot use bridge IPs** — `172.18.4.2`, `172.18.4.3` etc. do not exist in their network namespace.
-
----
+`network_mode: host` gives a container the Pi's real network stack — `eth0`, `wlan0`, the routing
+table, iptables and `127.0.0.1` (where the balena Supervisor listens). The trade-off is that it
+cannot use bridge addresses.
 
 ### 5.1 system-manager
 
-**Base image:** Alpine 3 + Python 3
-**Network:** `host`
-**Volume:** `system-manager` mounted at `/data`
-**Role:** Autonomous watchdog. Monitors system health and triggers corrective actions via the Balena Supervisor API.
+**Image:** `arm64v8/alpine:3` + Python 3 + `requests` + iptables · **Volume:** `system-manager` → `/data`
+**Restart:** `on-failure` · **Label:** `io.balena.features.supervisor-api`
 
-system-manager runs two scripts.
+`start.sh` runs `iptables.sh` in the background and then `watchdog.py` in the foreground. The
+Dockerfile `chmod +x`s all of them: git on Windows does not keep the executable bit, and until
+September 2026 every release built from a Windows checkout failed here with
+`exec /tmp/start.sh: permission denied` — which also left the balena Supervisor unable to apply
+any further update (it retries the failing start every 15 minutes).
 
-#### iptables.sh (runs once, background)
+#### iptables.sh
 
-```bash
-sleep 180  # wait for NetworkManager to create its chains
+Waits 180 s for NetworkManager to create its chains, then inserts (once, idempotently, for both
+`iptables` and `iptables-legacy`):
 
+```
 iptables -I nm-sh-fw-wlan0 -o wlan0 -s 172.18.4.0/24 -d 10.42.0.0/24 -j ACCEPT
-iptables-legacy -I nm-sh-fw-wlan0 -o wlan0 -s 172.18.4.0/24 -d 10.42.0.0/24 -j ACCEPT
 ```
 
-The Docker bridge (`172.18.4.0/24`) is a virtual network inside the Pi. WiFi devices on a repeater subnet (`10.42.0.0/24`) are on a different interface entirely. By default, the Linux kernel blocks traffic between different interfaces. This iptables rule explicitly permits bidirectional traffic between these two networks through `wlan0`.
+This allows the Docker bridge to talk to clients of a NetworkManager shared Wi‑Fi hotspot
+(`10.42.0.0/24`). No current site runs such a hotspot, so the rule is inert; the chain may not
+exist on an Ethernet-only box, in which case the command fails quietly.
 
-Without this rule, a WiFi-connected device cannot reach the MQTT broker at `172.18.4.7:1883` — the packets would be dropped at the kernel level regardless of what the broker does.
+#### watchdog.py — every 30 seconds
 
-The 180-second delay is deliberate: NetworkManager creates the chain `nm-sh-fw-wlan0` after it initialises the `wlan0` interface. Inserting a rule into a non-existent chain fails with an error.
+Talks to the **balena Supervisor** REST API on `127.0.0.1:48484` with the injected
+`BALENA_SUPERVISOR_ADDRESS` / `BALENA_SUPERVISOR_API_KEY` / `BALENA_APP_ID` / `BALENA_APP_NAME`.
 
-Both `iptables` and `iptables-legacy` rules are inserted because BalenaOS kernel versions may use either the nftables backend or the legacy xtables backend.
+1. **Setup-hotspot timer** (`check_wifi_portal_n_stop`): if the `wifi-connect` service (name from
+   `WIFI_PORTAL_SERVICE`, default `wifi-connect`) has been running for more than
+   `PORTAL_MAX_MINUTES` (default 10; `0` disables), stop it via `/v2/applications/<id>/stop-service`.
+   The hotspot is a boot-time convenience, not something to leave broadcasting.
+2. **Restart HA after an update** (`restart_hass`): compares the current `releaseId` from
+   `/v2/applications/state` with `/data/version.txt`; if it changed and stayed changed for two
+   minutes, restarts `homeassistant` and records the new id. Observed working on 22 Sep 2026.
+3. **Internet watchdog** (`check_internet`): `ping -c 1 google.com`; if it has failed for 30
+   minutes, `POST /v1/reboot`. Every action is appended to `/data/restartLog.txt`.
 
-#### watchdog.py (runs permanently, every 30 seconds)
-
-The watchdog communicates with the **Balena Supervisor**, a process running directly on the Pi OS (not in any container) that manages the Docker containers on behalf of Balena Cloud. It exposes a local HTTP REST API at the address injected into the container as `BALENA_SUPERVISOR_ADDRESS`.
-
-```python
-# constants.py — URLs built from injected environment variables
-SUPERVISOR_ADDRESS = os.getenv("BALENA_SUPERVISOR_ADDRESS")
-API_KEY            = os.getenv("BALENA_SUPERVISOR_API_KEY")
-APP_ID             = os.getenv("BALENA_APP_ID")
-
-STATUS_URL  = SUPERVISOR_ADDRESS + "/v2/state/status?apikey=" + API_KEY
-RESTART_URL = SUPERVISOR_ADDRESS + "/v2/applications/" + APP_ID + "/restart-service?apikey=" + API_KEY
-REBOOT_URL  = SUPERVISOR_ADDRESS + "/v1/reboot?apikey=" + API_KEY
-```
-
-**Check 1 — WiFi repeater lifecycle:**
-```python
-for container in response.json()["containers"]:
-    if container["serviceName"] == "wifi-repeater":
-        wifi_running = container["status"] == "Running"
-
-if wifi_running and delta_t > timedelta(minutes=10):
-    requests.post(STOP_URL, data='{"serviceName": "wifi-repeater"}')
-```
-Queries the Supervisor for container status. If the `wifi-repeater` service has been running for more than 10 minutes, it sends a stop command. The WiFi repeater is only needed for initial onboarding; leaving it running wastes resources.
-
-**Check 2 — Home Assistant version guard:**
-```python
-version = response.json()[APP_NAME]["services"]["homeassistant"]["releaseId"]
-
-with open("/data/version.txt", "a+") as f:
-    version_old = f.read()
-    if version_old != str(version):
-        if datetime.now() - version_changed_at < timedelta(minutes=2):
-            return version_changed_at  # grace period, don't restart yet
-        requests.post(RESTART_URL, data='{"serviceName": "homeassistant"}')
-        f.write(str(version))
-```
-Compares the current `releaseId` from Balena with the last known version stored in `/data/version.txt`. If they differ, it waits 2 minutes (grace period to allow the new image to fully download) then restarts HA via the Supervisor API. The new version is then saved. This is how OTA updates propagate — Balena pushes a new image and system-manager restarts HA to apply it without any manual SSH.
-
-**Check 3 — Internet watchdog:**
-```python
-response = os.system("ping -c 1 google.com")
-if response != 0:
-    if datetime.now() - last_seen > timedelta(minutes=30):
-        requests.post(REBOOT_URL)
-```
-Pings `google.com` from the host network — a true test of WAN connectivity over the real `wlan0` interface. If internet has been unreachable for 30 consecutive minutes, the entire Pi is rebooted via the Supervisor API. All reboots and restarts are logged to `/data/restartLog.txt` with timestamps.
-
----
+Logging is at DEBUG, which prints the Supervisor API key inside every request URL — reduce to INFO
+before the logs are shared.
 
 ### 5.2 wifi-connect
 
-**Base image:** Debian + Balena wifi-connect binary v4.11.84
-**Network:** `host`
-**Capabilities:** `NET_ADMIN`
-**Role:** Zero-touch WiFi onboarding via a browser-based captive portal.
+**Image:** `debian:bookworm` + `dnsmasq wireless-tools iproute2 network-manager` + balena
+`wifi-connect` v4.11.84 binary · **Network:** host · **Cap:** `NET_ADMIN` · **Label:** `io.balena.features.dbus`
 
-When a Pi is deployed at a new pilot site, it has no WiFi credentials. `wifi-connect` solves the cold-start problem.
+`scripts/start.sh`:
 
-#### start.sh logic
+1. Wait up to 60 s for a network, where "network" means a **default route** (Ethernet or Wi‑Fi)
+   *or* a Wi‑Fi association (`iwgetid -r`).
+2. If there is one: print `Network is up - skipping WiFi Connect`, and delete any leftover
+   NetworkManager profile named `WiFi Connect` in AP mode (`nmcli`, over the host D‑Bus) — the
+   hotspot outlives the container if wifi-connect was killed rather than stopped.
+3. If there is none: warn if `PORTAL_PASSPHRASE` is unset, then run `wifi-connect` in the
+   background (so SIGTERM reaches it). It brings up the access point **"WiFi Connect"**
+   (WPA2 with `PORTAL_PASSPHRASE`; `PORTAL_SSID` would rename it), serves the captive portal on
+   `192.168.42.1:<PORTAL_LISTENING_PORT>` (fleet: 8080), and when the user submits a network it
+   creates the Wi‑Fi profile, tears the hotspot down and exits.
+4. Then sleep forever so the container stays up (the watchdog stops the service after
+   `PORTAL_MAX_MINUTES` anyway).
 
-```bash
-export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/host/run/dbus/system_bus_socket
-
-iwgetid -r      # query the kernel for current WiFi SSID
-
-if [ $? -eq 0 ]; then
-    printf 'Skipping WiFi Connect\n'
-else
-    printf 'Starting WiFi Connect\n'
-    ./wifi-connect
-fi
-
-sleep infinity
-```
-
-`iwgetid -r` queries the kernel wireless subsystem. It returns exit code 0 and the SSID string if the device is associated with a WiFi network. It returns exit code 1 and empty output if not. This must run from the host network — from a bridge container it would query the container's own non-existent WiFi interface.
-
-When WiFi is not configured, `wifi-connect` turns the Pi into a **temporary WiFi access point**. A user connects to that hotspot on their phone, is redirected to a captive portal web page, selects the home WiFi network, enters the password, and the Pi connects. The access point then disappears.
-
-**D-Bus access** (`io.balena.features.dbus: '1'`): `wifi-connect` controls WiFi by sending commands to **NetworkManager** via D-Bus, a system inter-process communication bus. D-Bus uses a Unix socket file on the host filesystem. The label tells BalenaOS to mount the host's D-Bus socket into the container so `wifi-connect` can reach NetworkManager.
-
-**`NET_ADMIN` capability** grants permission to bring network interfaces up and down, assign IP addresses, and create virtual interfaces — all required to create and destroy the temporary access point.
+Before September 2026 the script only tested `iwgetid`, so every Ethernet-connected box started
+an **open** hotspot on boot and never stopped it. That is what the whole system-manager /
+wifi-connect fix addressed.
 
 ---
 
-## 6. Balena Cloud
+## 6. balenaCloud
 
-**Role:** Remote deployment, OTA update delivery, and fleet management.
+Fleet **`smartcoremtu/smartcore`**, `balena.yml` name `SmartCORE`, default device type
+`raspberrypi5`. Seven devices (September 2026): five households/SMEs in Co. Kerry and two MTU lab
+boxes (one Pi 4). All still on **development** OS images.
 
-Balena Cloud is not a component that runs on the Pi. It is a cloud service that BalenaOS connects to via a persistent VPN tunnel. It provides:
+What the cloud does for us:
 
-- **Fleet management:** All Pi devices at pilot sites belong to the `SmartCORE` fleet. A `balena push SmartCORE` command from a developer's machine builds new Docker images and sends them to every device in the fleet simultaneously.
-- **Environment variable injection:** The variables `INFLUX_TOKEN`, `CONFIG_USER`, `CONFIG_PASSWORD`, `BALENA_APP_NAME`, and `BALENA_APP_ID` are set in the Balena dashboard. BalenaOS injects them as environment variables into the relevant containers at startup. They never appear in the codebase.
-- **Supervisor API:** The Balena Supervisor runs on BalenaOS itself and exposes a local HTTP API at `BALENA_SUPERVISOR_ADDRESS`. system-manager uses this API to stop, restart, and reboot services without needing direct Docker socket access.
-
-`balena.yml` at the repo root identifies the fleet:
-```yaml
-name: SmartCORE
-type: sw.application
-data:
-  defaultDeviceType: raspberrypi5
-  supportedDeviceTypes:
-    - raspberrypi5
-version: 1.0.1
-```
+- **Releases**: `balena push <fleet> --draft` builds all eight images in the cloud; a device can be
+  pinned to a draft for testing; `balena release finalize` makes it the fleet target and every
+  online device updates (deltas). See `DEPLOYMENT.md`.
+- **Variables**: injected into containers at start. Service-scoped:
+  `INFLUX_TOKEN` (homeassistant), `CONFIG_USER`/`CONFIG_PASSWORD` (nginx), `PORTAL_PASSPHRASE`
+  (wifi-connect), `PORTAL_MAX_MINUTES` (system-manager); fleet-wide: `PORTAL_LISTENING_PORT`.
+- **Supervisor API** on each device, used by system-manager to stop/restart services and reboot.
+- **Remote access** for the team: `balena device ssh`, `balena device tunnel`, logs, dashboard
+  terminal. This is the only remote-access path to the boxes; there is no VPN or tunnel service
+  in the compose file. Homeowners reach their dashboard only on the home LAN.
 
 ---
 
-## 7. Remote Access — Mobile Application
+## 7. What Lives on the Device but Not in Git
 
-> **Full technical detail** for all options — WireGuard NAT traversal mechanics, docker-compose.yml snippets, MQTT Discovery, Cloudflare Access setup, HA app URL configuration, and security trade-offs — is in [`MQTT_AND_MOBILE_ACCESS.md`](MQTT_AND_MOBILE_ACCESS.md) Section 5.
+Things a fresh checkout does not show you but a deployed box has:
 
-By default, Home Assistant is only accessible on the same local network as the Pi. The HA mobile app (iOS/Android) on an external network (4G/5G) cannot reach it without one of the following configurations. All three options work without port forwarding, without a public IP, and all connections are encrypted in transit.
+| Where | What |
+|---|---|
+| `hass-config` volume, `.storage/` | HA owner account, integrations (`solarman`, `sigenergy`, `zha`, `energyid`, `hacs`, `mobile_app`, `hue`, …), device and entity registries, dashboards |
+| `hass-config` volume, `custom_components/` | `hacs`, `solarman`, `sigenergy`/`sigen` — installed per site through HACS |
+| `hass-config` volume, `backups/` | monthly HA backups (three kept) |
+| `influxdb-data` volume | the org, bucket, token and all data |
+| `system-manager` volume | `version.txt`, `restartLog.txt` |
+| balenaCloud | the variables above, device names, release pins |
+| balenaOS host | NetworkManager Wi‑Fi profiles, including any created by the setup portal |
 
-| Option | Cost | Phone software | URL style |
-|---|---|---|---|
-| **A — Nabu Casa** | ~£6/mo | HA app only | `https://abc.ui.nabu.casa` |
-| **B — Tailscale** | Free | Tailscale + HA app | `http://100.64.x.x:80` |
-| **C — Cloudflare Tunnel** | Free + domain | HA app only | `https://hems.yourdomain.com` |
-
-### Option A — Nabu Casa (Recommended for simplicity)
-
-HA opens a persistent outbound WebSocket to Nabu Casa's servers. The mobile app connects through that relay. Zero code changes, zero firewall changes.
-
-**Setup:** Settings → Home Assistant Cloud → Sign In → Enable Remote UI. Sign in with the same account in the mobile app.
-
-**Trade-off:** ~£6/month subscription. All traffic routes via Nabu Casa infrastructure.
-
-### Option B — Tailscale (Recommended for performance)
-
-Tailscale builds a WireGuard mesh VPN. The Pi and phone share encrypted P2P WireGuard tunnels. No client traffic passes through Tailscale's servers after the initial handshake.
-
-**docker-compose.yml addition:**
-```yaml
-tailscale:
-  image: tailscale/tailscale:latest
-  hostname: hems-pi
-  environment:
-    - TS_AUTHKEY=${TS_AUTH_KEY}           # set in Balena Cloud env vars
-    - TS_EXTRA_ARGS=--advertise-routes=172.18.4.0/24
-    - TS_STATE_DIR=/var/lib/tailscale
-  volumes:
-    - tailscale-state:/var/lib/tailscale
-  devices:
-    - /dev/net/tun:/dev/net/tun
-  cap_add:
-    - NET_ADMIN
-    - SYS_MODULE
-  networks:
-    hems:
-      ipv4_address: 172.18.4.10
-  restart: always
-```
-
-Approve the `172.18.4.0/24` route in the Tailscale admin console once. Install Tailscale on the phone. External URL: `http://100.64.x.x:80`.
-
-**Trade-off:** Free tier sufficient. Tailscale app required on every phone accessing the system.
-
-### Option C — Cloudflare Tunnel (Recommended for sharing access)
-
-`cloudflared` maintains outbound HTTPS connections to Cloudflare's global edge. Cloudflare routes a public domain to local Nginx. No inbound ports, no public IP, free TLS certificate managed by Cloudflare.
-
-**docker-compose.yml addition:**
-```yaml
-cloudflared:
-  image: cloudflare/cloudflared:latest
-  command: tunnel --no-autoupdate run
-  environment:
-    - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}    # set in Balena Cloud env vars
-  networks:
-    hems:
-      ipv4_address: 172.18.4.11
-  restart: always
-```
-
-Configure ingress rule in Cloudflare Zero Trust dashboard: `hems.yourdomain.com → http://172.18.4.4:80`. External URL: `https://hems.yourdomain.com`. Add Cloudflare IPs to `trusted_proxies` in `configuration.yaml`. Add Cloudflare Access policy for pre-authentication before requests reach HA.
-
-**Trade-off:** Requires a registered domain. Traffic routes via Cloudflare's CDN.
-
-### Option D — Direct port forwarding (Not Recommended)
-
-Forward port 8123 on the home router to the Pi's local IP. **Not recommended** — the current codebase has no HTTPS/TLS. Exposing plain HTTP HA to the internet risks credential interception and unauthorised access.
+`services/homeassistant/config/custom_components/hacs/` *is* in git (423 files) so HACS is
+present from first boot; everything installed through it is not.
 
 ---
 
-*Document generated from full codebase analysis and architecture review — 2026-02-24.*
-*Maintained by the SmartCORE Ireland team, Munster Technological University.*
+## 8. Known Issues
+
+| Issue | Detail | Status |
+|---|---|---|
+| Development OS images | Passwordless root SSH on `:22222` to anyone on the LAN, on every device | Open — reflash with production images |
+| Anonymous MQTT on a published port | `allow_anonymous true`, `1883:1883` | Open, low impact while idle |
+| Dead stream proxy | nginx `:7845` → `eesmart-d2l`, no such container | Open — remove or define |
+| Supervisor API key in logs | system-manager logs at DEBUG | Open |
+| `led.py` sleep outside loop | polls continuously instead of every 2 s | Open |
+| Repo config shadowed by volume | `COPY config /config` never reaches provisioned devices | By design; documented |
+| Missing include directories | `template_sensors/`, `automations/`, `themes/` referenced by `configuration.yaml`, exist nowhere | Cosmetic |
+| `hass-configurator:latest` unpinned | image can change under us | Open |
+| `EnergyID` webhook on one site | sends readings to a third-party cloud | Check against ethics application |
+| Port 6053 published on HA | ESPHome API, unused | Cosmetic |
+
+Fixed in September 2026: system-manager not starting (exec bit); open setup hotspot on Ethernet
+boxes; configurator without login and published on `:3218`; `restart: on_failure` typo;
+wifi-connect base image on end-of-life Debian bullseye.
+
+---
+
+*Rewritten 2026-09-22 from the code on branch `fix/system-manager-start-and-open-hotspot` and
+inspection of the seven fleet devices. Previous version 2026-02-24.*

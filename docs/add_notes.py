@@ -6,7 +6,8 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from lxml import etree
 
-PPTX_PATH = "D:/ems/docs/SmartCORE_HEMS_Partner_Presentation.pptx"
+from pathlib import Path
+PPTX_PATH = str(Path(__file__).with_name("SmartCORE_HEMS_Partner_Presentation.pptx"))
 
 # ── Notes text per slide (index 0 = slide 1) ─────────────────────────────────
 NOTES = [

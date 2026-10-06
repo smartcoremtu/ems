@@ -2,32 +2,45 @@
 
 export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/host/run/dbus/system_bus_socket
 
-# Optional step - it takes couple of seconds (or longer) to establish a WiFi connection
-# sometimes. In this case, following checks will fail and wifi-connect
-# will be launched even if the device will be able to connect to a WiFi network.
-# If this is your case, you can wait for a while and then check for the connection.
-# sleep 15
+# The captive portal is only for a box that has no network at all. A box on Ethernet has no
+# WiFi association, so testing WiFi alone (iwgetid) starts a setup hotspot that never goes away.
+# Treat either a default route (Ethernet or WiFi) or an associated WiFi network as "connected".
+has_network() {
+    ip route show default 2>/dev/null | grep -q . || iwgetid -r >/dev/null 2>&1
+}
 
-# Choose a condition for running WiFi Connect according to your use case:
+# DHCP can take a while after boot; give it a minute before deciding there is no network.
+for _ in $(seq 1 12); do
+    has_network && break
+    sleep 5
+done
 
-# 1. Is there a default gateway?
-# ip route | grep default
+# wifi-connect's access point is a NetworkManager profile on the host, so it outlives the
+# container if wifi-connect was killed rather than stopped. Remove a leftover one.
+remove_stale_portal() {
+    local ssid="${PORTAL_SSID:-WiFi Connect}"
+    if [ "$(nmcli -g 802-11-wireless.mode connection show "$ssid" 2>/dev/null)" = "ap" ]; then
+        printf 'Removing leftover access point "%s"\n' "$ssid"
+        nmcli connection delete "$ssid"
+    fi
+}
 
-# 2. Is there Internet connectivity?
-# nmcli -t g | grep full
-
-# 3. Is there Internet connectivity via a google ping?
-# wget --spider http://google.com 2>&1
-
-# 4. Is there an active WiFi connection?
-iwgetid -r
-
-if [ $? -eq 0 ]; then
-    printf 'Skipping WiFi Connect\n'
+if has_network; then
+    printf 'Network is up - skipping WiFi Connect\n'
+    remove_stale_portal
 else
-    printf 'Starting WiFi Connect\n'
-    ./wifi-connect
+    if [ -z "${PORTAL_PASSPHRASE}" ]; then
+        printf 'WARNING: PORTAL_PASSPHRASE is not set - the setup hotspot will be OPEN. Set it as a fleet variable (8+ characters).\n'
+    fi
+    printf 'No network - starting WiFi Connect\n'
+    # Run in the background and forward stop signals, so wifi-connect can take its access point
+    # down when the service is stopped (bash as PID 1 does not pass SIGTERM to a foreground child).
+    ./wifi-connect &
+    portal=$!
+    trap 'kill -TERM "$portal" 2>/dev/null; wait "$portal"; exit 0' TERM INT
+    wait "$portal"
 fi
 
-# Start your application here.
-sleep infinity
+trap 'exit 0' TERM INT
+sleep infinity &
+wait $!

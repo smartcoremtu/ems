@@ -1,5 +1,9 @@
 @startuml HEMS_Z2M_VPN_Architecture
+' PROPOSAL, NOT DEPLOYED (September 2026): Zigbee2MQTT instead of ZHA, plus Tailscale and Cloudflare
+' remote-access containers. The deployed system is architecture_diagram.puml. Kept as the reference
+' design for docs/MQTT_AND_MOBILE_ACCESS.md.
 !theme plain
+title PROPOSED architecture - Zigbee2MQTT + VPN / tunnel remote access (not deployed)
 skinparam defaultTextAlignment center
 skinparam componentStyle rectangle
 skinparam linetype polyline
@@ -30,7 +34,7 @@ skinparam cloud {
 
 skinparam actor {
   BackgroundColor #1a5276
-  FontColor       #ffffff
+  FontColor       #0b0b0b
   BorderColor     #2980b9
 }
 
@@ -44,7 +48,7 @@ package "Physical Layer" as PHYS {
 
   component "Grid Smart Meter\n(S0 Pulse LED)\n1000 pulses = 1 kWh" as METER
 
-  component "Frient SMSZB-120\nZigbee Blink Counter\nReads S0 pulse output\nTransmits via Zigbee" as FRIENT
+  component "frient EMIZB-141\nZigbee meter interface\nCounts the meter LED pulses\nTransmits via Zigbee" as FRIENT
 
   component "Zigbee USB Dongle\nSonoff ZBDongle-E\nChip: EFR32MG21\nProtocol: USB serial / EZSP" as DONGLE
 
@@ -64,14 +68,14 @@ package "Raspberry Pi 5  ·  BalenaOS" as RPI {
     component "zigbee2mqtt\n172.18.4.5\n──────────────────\nkoenkk/zigbee2mqtt\nOwns USB dongle\n(privileged: true)\nAdapter: ezsp (EFR32MG21)\n──────────────────\nPublishes:\n  zigbee2mqtt/<device>\n  {\"power\":342,\"energy\":1234.5}\n──────────────────\nMQTT Discovery:\n  homeassistant/sensor/\n  <device>/<field>/config\n  → HA auto-creates entities\n──────────────────\nVolume: zigbee2mqtt-data\nConfig via env vars:\n  MQTT_SERVER: 172.18.4.7\n  HOMEASSISTANT: true\n  SERIAL_ADAPTER: ezsp" as Z2M
 
     ' --- NGINX (entry point — now also handles HTTPS) ---
-    component "nginx-reverse-proxy\n172.18.4.4 : 80 / 443\n──────────────────\n/              → HA  172.18.4.2:8123\n/influx/       → InfluxDB  172.18.4.3:8086\n/configurator/ → Configurator  172.18.4.6:3218\nTCP :7845      → eesmart-d2l:7845\n──────────────────\nOptional TLS:\n  listen 443 ssl\n  ssl_certificate fullchain.pem\n  (Let's Encrypt / self-signed)" as NGINX
+    component "nginx-reverse-proxy\n172.18.4.4 : 80 / 443\n──────────────────\n/              → HA  172.18.4.2:8123\n/influx/       → InfluxDB  172.18.4.3:8086\n/configurator/ → Configurator  172.18.4.6:3218 (basic auth)\nTCP :7845      → eesmart-d2l:7845 (undefined)\n──────────────────\nOptional TLS:\n  listen 443 ssl\n  ssl_certificate fullchain.pem\n  (Let's Encrypt / self-signed)" as NGINX
 
     ' --- HOME ASSISTANT (core of the system) ---
-    package "Home Assistant  ·  172.18.4.2 : 8123\nhomeassistant/home-assistant:2025.3  ·  Volume: hass-config" as HA {
+    package "Home Assistant  ·  172.18.4.2 : 8123\nghcr.io/home-assistant/home-assistant:2026.6.3  ·  Volume: hass-config" as HA {
 
       component "MQTT Integration\nBroker: 172.18.4.7:1883\nConfigured via HA UI\n──────────────────\nMQTT Discovery: ENABLED\nSubscribes:\n  zigbee2mqtt/#\n  homeassistant/#\n──────────────────\nAuto-creates sensor.*\nentities from Discovery\npayloads published by Z2M\n──────────────────\n[PRIMARY ACTIVE PATH]\n(ZHA integration removed)" as MQTTINT
 
-      component "HA State Machine\nsensor.frient_blink_counter_power\nsensor.frient_blink_counter_energy\n(auto-created via MQTT Discovery)" as STATE
+      component "HA State Machine\nsensor.<meter>_power\nsensor.<meter>_energy\n(auto-created via MQTT Discovery)" as STATE
 
       component "HA Internal Event Bus\nFires state_changed\non every entity update" as BUS
 
@@ -105,9 +109,9 @@ package "Raspberry Pi 5  ·  BalenaOS" as RPI {
   ' --- HOST NETWORK SERVICES ---
   package "Host Network  (no bridge IP)" as HOSTNET {
 
-    component "system-manager\nPython 3 · Alpine\n──────────────────\nLoop every 30 s:\n1. Stop wifi-repeater @ 10 min\n2. Restart HA on new releaseId\n   (2 min grace period)\n3. Reboot if internet down 30 min\n──────────────────\nVolume: /data\n  restartLog.txt\n  version.txt" as SM
+    component "system-manager\nPython 3 · Alpine\n──────────────────\nLoop every 30 s:\n1. Stop wifi-connect after\n   PORTAL_MAX_MINUTES (10)\n2. Restart HA on new releaseId\n   (2 min grace period)\n3. Reboot if internet down 30 min\n──────────────────\nVolume: /data\n  restartLog.txt\n  version.txt" as SM
 
-    component "wifi-connect\nBalena binary v4.11.84\n──────────────────\nOn boot: checks iwgetid -r\nIf no WiFi → open captive\nportal for SSID + password\nentry. Needs: NET_ADMIN,\nD-Bus access." as WIFIC
+    component "wifi-connect\nBalena binary v4.11.84\n──────────────────\nOn boot: default route or\nWiFi association → skip.\nOtherwise WPA2 hotspot\n'WiFi Connect' + portal :8080\nNeeds: NET_ADMIN, D-Bus." as WIFIC
 
   }
 
@@ -117,7 +121,7 @@ package "Raspberry Pi 5  ·  BalenaOS" as RPI {
 ' COLUMN 3 — CLOUD + EXTERNAL
 ' =====================================================================
 
-cloud "Balena Cloud\nFleet: SmartCORE\n(raspberrypi5)\n──────────────────\nOTA updates\nEnv var injection:\n  TS_AUTH_KEY\n  CF_TUNNEL_TOKEN\n  INFLUX_TOKEN\nRemote monitoring" as BALENA
+cloud "balenaCloud\nFleet: smartcoremtu/smartcore\n(raspberrypi5)\n──────────────────\nOTA updates\nEnv var injection:\n  TS_AUTH_KEY\n  CF_TUNNEL_TOKEN\n  INFLUX_TOKEN\nRemote monitoring" as BALENA
 
 cloud "eesmart-d2l\nExternal energy service\nPort 7845 (TCP)\nProxied by Nginx stream block.\nNot yet defined in compose." as EESMART
 
